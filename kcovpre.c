@@ -1,5 +1,3 @@
-// File: kcov_preload.c (English Version, Simplified)
-
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>

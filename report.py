@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# File: report.py
 
 import subprocess
 import re
@@ -7,7 +6,6 @@ from os import path
 from collections import defaultdict
 from pathlib import Path
 
-# --- Configuration ---
 # Path to the vmlinux file with debug symbols
 VMLINUX_PATH = "$HOME/linux/vmlinux"
 # Path to the kernel source code tree

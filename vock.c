@@ -1,5 +1,3 @@
-// File: vock.c (The Tracer/Driver Program)
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

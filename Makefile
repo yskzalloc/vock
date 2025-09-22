@@ -1,10 +1,7 @@
-# Makefile for the vock kernel coverage tool
-
 CC ?= gcc
 CFLAGS += -Wall -O2
 LDFLAGS +=
 
-# --- Configuration ---
 TOOL_NAME = vock
 
 # The main driver executable, compiled from vock.c
@@ -27,7 +24,7 @@ all: $(TARGET_EXE) $(TARGET_LIB)
 $(TARGET_EXE): $(EXE_SOURCE)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Rule to compile the .so file from vockpre.c
+# Rule to compile the .so file from kcovpre.c
 $(TARGET_LIB): $(LIB_SOURCE)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
 
