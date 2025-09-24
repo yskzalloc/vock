@@ -1,54 +1,73 @@
-CC ?= gcc
+# Compiler
+CC ?= clang
 CFLAGS += -Wall -O2
 LDFLAGS +=
 
+# Auto-detect kernel BTF (can be overridden: make DEBUG_INFO_BTF=1)
+DEBUG_INFO_BTF ?= $(shell [ -e /sys/kernel/btf/vmlinux ] && echo 1 || echo 0)
+
+# Project
 TOOL_NAME = vock
 
-# The main driver executable, compiled from vock.c
 TARGET_EXE = vock
 EXE_SOURCE = vock.c
 
-# The preload library, compiled from vockpre.c
 TARGET_LIB = kcovpre.so
 LIB_SOURCE = kcovpre.c
 
-# Installation directories
+BPF_SRC = syscall.bpf.c
+BPF_OBJ = syscall.bpf.o
+
 INSTALL_DIR = /usr/local/lib/$(TOOL_NAME)
 BIN_DIR = /usr/local/bin
 
-# Default target: build both the executable and the shared library
-.PHONY: all
-all: $(TARGET_EXE) $(TARGET_LIB)
+# If BTF exists, enable syscall tracing build.
+ifeq ($(DEBUG_INFO_BTF),1)
+  CFLAGS += -DDEBUG_INFO_BTF=1
+  BUILD_BPF := 1
+else
+  BUILD_BPF := 0
+endif
 
-# Rule to compile the main vock executable
+.PHONY: all
+all: $(TARGET_EXE) $(TARGET_LIB) $(if $(filter 1,$(BUILD_BPF)),$(BPF_OBJ))
+
+# vock driver
 $(TARGET_EXE): $(EXE_SOURCE)
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
-# Rule to compile the .so file from kcovpre.c
+# preload library (KCOV only)
 $(TARGET_LIB): $(LIB_SOURCE)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
 
+# eBPF compile only when BTF is present
+ifeq ($(BUILD_BPF),1)
+$(BPF_OBJ): $(BPF_SRC) vmlinux.h
+	clang -O2 -g -target bpf -c $< -o $@
+
+# Generate vmlinux.h from kernel BTF
+vmlinux.h:
+	bpftool btf dump file /sys/kernel/btf/vmlinux format c > $@
+endif
+
 .PHONY: install
 install: all
-	@echo "Installing $(TOOL_NAME) to $(INSTALL_DIR)..."
+	@echo "Installing $(TOOL_NAME) (DEBUG_INFO_BTF=$(DEBUG_INFO_BTF))..."
 	sudo mkdir -p $(INSTALL_DIR)
-	sudo cp $(TARGET_EXE) $(INSTALL_DIR)/
-	sudo cp $(TARGET_LIB) $(INSTALL_DIR)/
-	sudo cp report.py $(INSTALL_DIR)/
+	sudo cp $(TARGET_EXE) $(TARGET_LIB) report.py $(INSTALL_DIR)/
+ifneq ($(BUILD_BPF),0)
+	sudo cp $(BPF_OBJ) $(INSTALL_DIR)/
+endif
 	sudo ln -sf $(INSTALL_DIR)/$(TARGET_EXE) $(BIN_DIR)/$(TOOL_NAME)
-	@echo ""
-	@echo "✅ Installation complete."
-	@echo "You can now run '$(TOOL_NAME)' from any terminal."
+	@echo "✅ Installed."
 
 .PHONY: uninstall
 uninstall:
-	@echo "Uninstalling $(TOOL_NAME)..."
 	sudo rm -f $(BIN_DIR)/$(TOOL_NAME)
 	sudo rm -rf $(INSTALL_DIR)
-	@echo "✅ Uninstallation complete."
+	@echo "✅ Uninstalled."
 
 .PHONY: clean
 clean:
-	@echo "Cleaning up..."
-	rm -f $(TARGET_EXE) $(TARGET_LIB)
+	rm -f $(TARGET_EXE) $(TARGET_LIB) $(BPF_OBJ) vmlinux.h
 
