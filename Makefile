@@ -28,20 +28,18 @@ $(TARGET_EXE): $(EXE_SOURCE)
 $(TARGET_LIB): $(LIB_SOURCE)
 	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
 
-# Target to install the complete tool
 .PHONY: install
 install: all
 	@echo "Installing $(TOOL_NAME) to $(INSTALL_DIR)..."
 	sudo mkdir -p $(INSTALL_DIR)
 	sudo cp $(TARGET_EXE) $(INSTALL_DIR)/
 	sudo cp $(TARGET_LIB) $(INSTALL_DIR)/
-	sudo cp report_coverage.py $(INSTALL_DIR)/
+	sudo cp report.py $(INSTALL_DIR)/
 	sudo ln -sf $(INSTALL_DIR)/$(TARGET_EXE) $(BIN_DIR)/$(TOOL_NAME)
 	@echo ""
 	@echo "✅ Installation complete."
 	@echo "You can now run '$(TOOL_NAME)' from any terminal."
 
-# Target to uninstall the tool
 .PHONY: uninstall
 uninstall:
 	@echo "Uninstalling $(TOOL_NAME)..."
@@ -49,7 +47,6 @@ uninstall:
 	sudo rm -rf $(INSTALL_DIR)
 	@echo "✅ Uninstallation complete."
 
-# Target to clean up all build artifacts
 .PHONY: clean
 clean:
 	@echo "Cleaning up..."
