@@ -1,0 +1,51 @@
+name: vock CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies and setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang flex bison bc pahole libelf-dev \
+          libssl-dev kmod libncurses-dev git python3-pip python3-venv qemu-system
+        python3 -m venv venv-virtme
+
+        source venv-virtme/bin/activate
+        pip3 install git+https://github.com/arighi/virtme-ng.git
+        echo "$PWD/venv-virtme/bin" >> $GITHUB_PATH
+
+        clang --version | head -1
+        git clone -b staging-testing --depth 1 \
+          https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
+
+    - name: Detect VM target
+      run: |
+        if [ -w /dev/kvm ]; then
+          echo "VM_TARGET=vng-kvm" >> $GITHUB_ENV
+        else
+          echo "VM_TARGET=vng-tcg" >> $GITHUB_ENV
+        fi
+
+    - name: "Test 1: kernel coverage (hw + kcov)"
+      run: |
+        source venv-virtme/bin/activate
+        ./vock selftest 1 --on $VM_TARGET --kernel-src $HOME/stable
+
+    - name: "Test 2: syscall engines"
+      run: |
+        source venv-virtme/bin/activate
+        ./vock selftest 2 --on $VM_TARGET --kernel-src $HOME/stable
+
+    - name: "Test 3: mode hw"
+      run: |
+        source venv-virtme/bin/activate
+        ./vock selftest 3 --on $VM_TARGET --kernel-src $HOME/stable

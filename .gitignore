@@ -1,0 +1,14 @@
+*.o
+*.so
+vock
+vmlinux.h
+hw_trace.bin
+*.syz
+__pycache__/
+
+# Generated eBPF artifacts
+syscall/ebpf/vmlinux.h
+syscall/ebpf/trace.bpf.o
+syscall/ebpf/trace.skel.h
+*.html
+*.log
