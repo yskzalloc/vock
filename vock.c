@@ -349,6 +349,7 @@ int main(int argc, char *argv[])
 "syscall tracing:\n"
 "  --syscall [BACKEND]  trace syscalls → trace.log\n"
 "                       backends: ptrace (default), sud, ebpf\n"
+"                       sud requires: echo 0 > /proc/sys/vm/mmap_min_addr\n"
 "  --syzlang            also emit trace.syz (for syz-trace2syz)\n"
 "\n"
 "subcommands:\n"

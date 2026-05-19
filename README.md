@@ -96,8 +96,13 @@ Coverage + syscall trace in one shot:
 | Backend | Flag | Speed | Requirements |
 |---------|------|-------|-------------|
 | ptrace | `--syscall ptrace` | Moderate | Any kernel |
-| SUD | `--syscall sud` | Fast | Kernel ≥ 5.11, x86_64 |
+| SUD | `--syscall sud` | Fast | Kernel ≥ 5.11, x86_64, `mmap_min_addr=0` |
 | eBPF | `--syscall ebpf` | Fastest | `make EBPF=1` + libbpf-dev |
+
+SUD setup:
+```bash
+echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
+```
 
 ## Architecture
 

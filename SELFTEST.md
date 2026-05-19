@@ -5,55 +5,85 @@ Automated test framework. Configures kernels, builds, boots VMs, and verifies ea
 ## Quick Start
 
 ```bash
-vock selftest                              # host-only (fast)
-vock selftest --on vng-kvm                 # full VM test with KVM
-vock selftest --on vng-tcg                 # full VM test without KVM (CI)
-vock selftest --on host                    # explicit host test
+# VM tests (need kernel source)
+vock selftest 1 --on vng-kvm --kernel-src ~/net
+vock selftest 2 --on vng-kvm --kernel-src ~/net
+
+# Bare metal tests (need Intel PT hardware)
+vock selftest 3 --kernel-src ~/net
+
+# CI (no KVM available)
+vock selftest 1 --on vng-tcg --kernel-src ~/net
 ```
 
 ## Options
 
 ```
-vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH] [1|2|3|4]
+vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] [1-7]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--on` | `host` | Where to run tests |
-| `--kernel-src` | `$HOME/stable` | Kernel source tree for VM tests |
-| `1`-`4` | all | Run specific test only |
+| `--on` | `vng-kvm` | VM acceleration for tests that need vng |
+| `--kernel-src` | `$HOME/stable` | Kernel source tree |
+| `--llvm` | auto-detect | LLVM suffix (e.g. `-21`). Also reads `LLVM` env |
+| `1`-`7` | all | Run specific test only |
 
-## What Gets Tested
+## Test Numbers
 
-### Host tests (`--on host`)
+| # | Name | Runs on | What |
+|---|------|---------|------|
+| 1 | Coverage + Syscall | vng | KCOV+vmlinux, KCOV+BTF × each --syscall |
+| 2 | Syscall engines | vng | ptrace/sud/ebpf + syzlang format check |
+| 3 | Intel PT | **host** | HW + vmlinux × each --syscall (ptrace/sud/ebpf) |
+| 4 | CoreSight | **host** | aarch64 HW trace, KCOV disabled |
+| 5 | Filter + netdev | vng | `--filter net` + veth create/configure/destroy |
+| 6 | BTF | vng | `--btf --kernel-src` + HTML report |
+| 7 | Crypto | vng | xts(aes) decrypt coverage + verification |
 
-| Test | What |
-|------|------|
-| hw coverage | Intel PT → kerncov.log + coverage.html |
-| --syscall ptrace | trace.log in strace format |
-| --syzlang | trace.log + trace.syz |
-| --syscall sud | SUD/lazypoline trace |
-| --syscall ebpf | eBPF tracepoints (if permissions allow) |
-| hw + syzlang | Combined coverage + syscall |
-| hw + sud + syzlang | Combined with SUD backend |
+## Test 1: Coverage + Syscall (vng)
 
-### VM tests (`--on vng-kvm` / `--on vng-tcg`)
+Builds one kernel, runs 2 groups:
 
-| Test | What |
-|------|------|
-| kcov | CONFIG_KCOV coverage |
-| kcov + ptrace | Combined |
-| kcov + sud | Combined |
-| kcov + ebpf | Combined (needs CONFIG_BPF + BTF) |
-| syzlang format | Verify strace-compatible output |
-| filter + kcov + ebpf | `--filter net` with `ip addr show`, verify netdev paths |
+### Group A: KCOV + vmlinux + each `--syscall`
+
+```
+--mode kcov --syscall ptrace --vmlinux  → kerncov.log + trace.log + coverage.html
+--mode kcov --syscall sud --vmlinux     → kerncov.log + trace.log + coverage.html
+--mode kcov --syscall ebpf --vmlinux    → kerncov.log + trace.log + coverage.html
+```
+
+### Group B: KCOV + BTF + kernel-src + each `--syscall`
+
+```
+--mode kcov --syscall ptrace --btf --kernel-src  → kerncov.log + trace.log + coverage.html
+--mode kcov --syscall sud --btf --kernel-src     → kerncov.log + trace.log + coverage.html
+--mode kcov --syscall ebpf --btf --kernel-src    → kerncov.log + trace.log + coverage.html
+```
+
+## Test 3: Intel PT (host, bare metal)
+
+Requires Intel PT hardware. Skipped on AMD/KVM.
+
+```
+--mode hw --syscall ptrace --vmlinux  → kerncov.log + trace.log
+--mode hw --syscall sud --vmlinux     → kerncov.log + trace.log
+--mode hw --syscall ebpf --vmlinux    → kerncov.log + trace.log
+```
+
+## Target Programs
+
+| Test | Target | Kernel subsystem |
+|------|--------|-----------------|
+| 1, 2, 6, 7 | xts(aes) decrypt | crypto (skcipher, aes, xts) |
+| 5 | veth create/up/mtu/destroy | netdev (rtnl_newlink, dev_change_flags) |
 
 ## Kernel Configuration
 
-### Full config (all features)
+### Full config
 
 ```bash
-cd ~/stable
+cd ~/net
 scripts/config \
     --enable CONFIG_DEBUG_KERNEL \
     --enable CONFIG_KCOV \
@@ -63,6 +93,10 @@ scripts/config \
     --enable CONFIG_PERF_EVENTS \
     --enable CONFIG_CPU_SUP_INTEL \
     --enable CONFIG_BPF_SYSCALL \
+    --enable CONFIG_CRYPTO_XTS \
+    --enable CONFIG_CRYPTO_USER \
+    --enable CONFIG_CRYPTO_USER_API_SKCIPHER \
+    --enable CONFIG_VETH \
     --enable CONFIG_IKCONFIG \
     --enable CONFIG_IKCONFIG_PROC \
     --disable CONFIG_DEBUG_INFO_NONE
@@ -76,49 +110,28 @@ vng LLVM=-21 --build
 |---------|-----------------|
 | `--mode hw` | `PERF_EVENTS`, `CPU_SUP_INTEL` |
 | `--mode kcov` | `KCOV`, `KCOV_INSTRUMENT_ALL`, `DEBUG_INFO` |
+| `--btf` | `DEBUG_INFO_BTF` |
 | `--syscall ebpf` | `BPF_SYSCALL`, `DEBUG_INFO_BTF` |
 | `--syscall ptrace` | (none) |
 | `--syscall sud` | (none, kernel ≥ 5.11) |
+| crypto target | `CRYPTO_XTS`, `CRYPTO_USER`, `CRYPTO_USER_API_SKCIPHER` |
+| netdev target | `VETH`, `NET`, `INET` |
 
-### SUD requirement
+## LLVM Toolchain
+
+Priority: `--llvm` flag > `LLVM` env > auto-detect.
 
 ```bash
-echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
+vock selftest 1 --llvm -21 --kernel-src ~/net
+LLVM=-21 vock selftest 1 --kernel-src ~/net
 ```
-
-## Execution Targets
-
-| Target | Speed | Use when |
-|--------|-------|----------|
-| `host` | Fast | Quick validation, Intel PT on baremetal |
-| `vng-kvm` | Medium | Full pipeline with KVM |
-| `vng-tcg` | Slow | CI without KVM |
-
-## Test Numbers
-
-| # | Name | What |
-|---|------|------|
-| 1 | Coverage + Syscall | All modes in one kernel |
-| 2 | Syscall only | All backends, format verification |
-| 3 | Intel PT (no KCOV) | Proves hw mode works independently |
-| 4 | CoreSight (aarch64) | ARM64 hardware trace |
-| 5 | Filter | `--filter net` + `--mode kcov` + `--syscall ebpf` with `ip addr show` |
 
 ## GitHub CI
 
 ```yaml
 - name: Test
   run: |
-    if [ -w /dev/kvm ]; then TARGET=vng-kvm; else TARGET=vng-tcg; fi
-    ./vock selftest --on $TARGET --kernel-src $HOME/stable
+    if [ -w /dev/kvm ]; then ON=vng-kvm; else ON=vng-tcg; fi
+    ./vock selftest 1 --on $ON --kernel-src $PWD/staging
+    ./vock selftest 2 --on $ON --kernel-src $PWD/staging
 ```
-
-## Architecture Detection
-
-The selftest auto-detects:
-- CPU (Intel PT / CoreSight / AMD)
-- KVM availability
-- Installed clang version
-- Kernel config via `/proc/config.gz`
-
-Skips tests that can't run on the current hardware.

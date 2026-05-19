@@ -134,6 +134,9 @@ def kernel_build(kernel_src):
 
 
 def vng_run(kernel_src, cmd):
+    """Run command on target. If --on host, run directly. Otherwise use vng."""
+    if RUN_TARGET == "host":
+        return run(cmd, cwd=kernel_src, timeout=600)
     vng_cmd = ["vng", "--rw"]
     if RUN_TARGET == "vng-tcg":
         vng_cmd.append("--disable-kvm")
@@ -171,8 +174,27 @@ def crypto_prepare():
     return crypto_setup_cmds()
 
 
+# SUD requires mmap_min_addr=0 for zpoline
+SUD_SETUP = "echo 0 > /proc/sys/vm/mmap_min_addr 2>/dev/null; "
+
 # Target command for VM tests (exercises crypto subsystem instead of /bin/ls)
 CRYPTO_TARGET = "/bin/sh /tmp/dec.sh"
+
+VERBOSE = False
+
+
+def vlog(r):
+    """Print command output if --verbose."""
+    if not VERBOSE:
+        return
+    out = r.stdout.decode() if r.stdout else ""
+    err = r.stderr.decode() if r.stderr else ""
+    if out:
+        for line in out.strip().split('\n')[-20:]:
+            print(f"    | {line}")
+    if err:
+        for line in err.strip().split('\n')[-10:]:
+            print(f"    ! {line}")
 
 
 def test_default(vock_dir, kernel_src, arch_info, syscall_on):
@@ -217,16 +239,18 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
 
     for backend in ["ptrace", "sud", "ebpf"]:
         print(f"\n[Test: --mode kcov --syscall {backend} --vmlinux]")
+        sud_pre = SUD_SETUP if backend == "sud" else ""
         r = vng_run(kernel_src, [
             "bash", "-c",
-            f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
+            f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
             f"rm -f kerncov.log coverage.html trace.log && "
-            f"{crypto_prepare()} && "
+            f"{sud_pre}{crypto_prepare()} && "
             f"./vock --mode kcov --syscall {backend} --vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"[ -f coverage.html ] && echo HTML_OK"
         ])
+        vlog(r)
         out = r.stdout.decode() if r.stdout else ""
         if "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
@@ -248,15 +272,17 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
 
     for backend in ["ptrace", "sud", "ebpf"]:
         print(f"\n[Test: --mode kcov --syscall {backend} --btf --kernel-src]")
+        sud_pre = SUD_SETUP if backend == "sud" else ""
         r = vng_run(kernel_src, [
             "bash", "-c",
             f"cd {vock_dir} && rm -f kerncov.log coverage.html trace.log && "
-            f"{crypto_prepare()} && "
+            f"{sud_pre}{crypto_prepare()} && "
             f"./vock --mode kcov --syscall {backend} --btf --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"[ -f coverage.html ] && echo HTML_OK"
         ])
+        vlog(r)
         out = r.stdout.decode() if r.stdout else ""
         if "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
@@ -272,33 +298,6 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
             log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
         if "HTML_OK" in out:
             log("PASS", f"  coverage.html: source-highlighted functions")
-
-    # ─── Group C: HW (Intel PT) + vmlinux — bare metal only ──────────────────
-    print("\n── Group C: HW + vmlinux (bare metal) ──")
-
-    if not (arch_info["has_intel_pt"] or arch_info["has_coresight"]):
-        log("SKIP", "hw mode: no Intel PT/CoreSight (KVM guest)")
-    else:
-        vock = os.path.join(vock_dir, "vock")
-        run(["make", "-C", vock_dir, "CC=clang", "DEBUG_INFO_BTF=0", "EBPF=1", "-s"],
-            capture_output=True)
-
-        for backend in ["ptrace", "sud"]:
-            print(f"\n[Test: --mode hw --syscall {backend} --vmlinux]")
-            cov = os.path.join(vock_dir, "kerncov.log")
-            tlog = os.path.join(vock_dir, "trace.log")
-            for f in [cov, tlog]:
-                if os.path.isfile(f): os.remove(f)
-            r = run([vock, "--mode", "hw", "--syscall", backend,
-                     "--vmlinux", vmlinux, "--kernel-src", kernel_src,
-                     "/bin/ls", "/tmp"], cwd=vock_dir)
-            if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-                pcs = len(open(cov).readlines())
-                log("PASS", f"hw+{backend}+vmlinux: {pcs} PCs")
-            else:
-                log("FAIL", f"hw+{backend}+vmlinux: no coverage")
-            if os.path.isfile(tlog) and os.path.getsize(tlog) > 0:
-                log("PASS", f"  trace.log: {len(open(tlog).readlines())} syscalls")
 
     return True
 
@@ -323,6 +322,9 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": False,
         "CONFIG_PERF_EVENTS": True, "CONFIG_CPU_SUP_INTEL": True,
+        "CONFIG_BPF_SYSCALL": True, "CONFIG_DEBUG_INFO_BTF": True,
+        "CONFIG_DEBUG_INFO": True, "CONFIG_DEBUG_INFO_DWARF5": True,
+        "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
@@ -335,37 +337,33 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         log("FAIL", "kernel build failed"); return False
     log("PASS", "kernel built without KCOV")
 
-    print("\n[Test: Intel PT on host]")
-    vock = os.path.join(vock_dir, "vock")
-    run(["make", "-C", vock_dir, "CC=clang", "DEBUG_INFO_BTF=0", "-s"], capture_output=True)
-    cov = os.path.join(vock_dir, "kerncov.log")
-    html_out = os.path.join(vock_dir, "coverage.html")
-    if os.path.isfile(cov): os.remove(cov)
-    if os.path.isfile(html_out): os.remove(html_out)
-    r = run([vock, "-A", "2", "-B", "2", "--mode", "hw",
-             "--vmlinux", os.path.join(kernel_src, "vmlinux"),
-             "--kernel-src", kernel_src, "/bin/ls", "/tmp"], cwd=vock_dir)
-    if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-        pcs = len(open(cov).readlines())
-        log("PASS", f"Intel PT: {pcs} kernel PCs (no KCOV)")
-    else:
-        log("FAIL", "Intel PT failed"); return False
-    if os.path.isfile(html_out) and os.path.getsize(html_out) > 0:
-        log("PASS", "coverage.html generated (-A 2 -B 2)")
+    print("\n[Test: Intel PT + each --syscall]")
+    vmlinux = os.path.join(kernel_src, "vmlinux")
 
-    print("\n[Test: syscall without KCOV (VM)]")
-    r = vng_run(kernel_src, [
-        "bash", "-c",
-        f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{crypto_prepare()} && ./vock --syscall {CRYPTO_TARGET} 2>&1; "
-        f"[ -s trace.log ] && echo OK=$(wc -l < trace.log) && "
-        f"[ ! -e /sys/kernel/debug/kcov ] && echo NO_KCOV"
-    ])
-    out = r.stdout.decode() if r.stdout else ""
-    if "OK=" in out:
-        log("PASS", f"syscall without KCOV ({out.split('OK=')[1].split()[0]} syscalls)")
-    if "NO_KCOV" in out:
-        log("PASS", "confirmed: no /sys/kernel/debug/kcov")
+    for backend in ["ptrace", "sud", "ebpf"]:
+        print(f"\n[--mode hw --syscall {backend}]")
+        r = vng_run(kernel_src, [
+            "bash", "-c",
+            f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
+            f"rm -f kerncov.log trace.log && "
+            f"./vock --mode hw --syscall {backend} "
+            f"--vmlinux {vmlinux} --kernel-src {kernel_src} /bin/ls /tmp 2>&1; "
+            f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
+            f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log)"
+        ])
+        vlog(r)
+        out = r.stdout.decode() if r.stdout else ""
+        if "KCOV_PCS=" in out:
+            pcs = out.split("KCOV_PCS=")[1].split()[0]
+            if int(pcs) > 0:
+                log("PASS", f"hw+{backend}: {pcs} PCs")
+            else:
+                log("FAIL", f"hw+{backend}: no coverage")
+        else:
+            log("FAIL", f"hw+{backend}: failed")
+        if "TRACE_OK=" in out:
+            log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
+
     return True
 
 
@@ -401,15 +399,21 @@ def test_coresight(vock_dir, kernel_src, arch_info):
         log("FAIL", "kernel build failed"); return False
     log("PASS", "kernel built without KCOV")
 
-    print("\n[Test: CoreSight on host]")
-    vock = os.path.join(vock_dir, "vock")
-    run(["make", "-C", vock_dir, "CC=clang", "DEBUG_INFO_BTF=0", "-s"], capture_output=True)
-    cov = os.path.join(vock_dir, "kerncov.log")
-    if os.path.isfile(cov): os.remove(cov)
-    r = run([vock, "--mode", "hw", "/bin/ls", "/tmp"], cwd=vock_dir)
-    if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-        pcs = len(open(cov).readlines())
-        log("PASS", f"CoreSight: {pcs} kernel PCs (no KCOV)")
+    print("\n[Test: CoreSight]")
+    r = vng_run(kernel_src, [
+        "bash", "-c",
+        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
+        f"rm -f kerncov.log && "
+        f"./vock --mode hw /bin/ls /tmp 2>&1; "
+        f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0)"
+    ])
+    out = r.stdout.decode() if r.stdout else ""
+    if "KCOV_PCS=" in out:
+        pcs = out.split("KCOV_PCS=")[1].split()[0]
+        if int(pcs) > 0:
+            log("PASS", f"CoreSight: {pcs} kernel PCs (no KCOV)")
+        else:
+            log("FAIL", "CoreSight: no coverage")
     else:
         log("FAIL", "CoreSight failed")
     return True
@@ -473,7 +477,7 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     r = vng_run(kernel_src, [
         "bash", "-c",
         f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{crypto_prepare()} && ./vock --syscall sud --mode kcov {CRYPTO_TARGET} 2>&1; "
+        f"{SUD_SETUP}{crypto_prepare()} && ./vock --syscall sud --mode kcov {CRYPTO_TARGET} 2>&1; "
         f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log)"
     ])
     out = r.stdout.decode() if r.stdout else ""
@@ -543,7 +547,7 @@ def test_filter(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --syscall ebpf --filter net (veth create/destroy)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
+        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.html trace.log && "
         f"./vock --mode kcov --syscall ebpf --filter net "
         f"--vmlinux {vmlinux} --kernel-src {kernel_src} "
@@ -622,7 +626,7 @@ def test_btf(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --btf (crypto decrypt)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
+        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.txt && "
         f"{crypto_prepare()} && ./vock --mode kcov --btf {CRYPTO_TARGET} 2>&1; "
         f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
@@ -700,7 +704,7 @@ def test_crypto(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --btf (xts(aes) decrypt)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
+        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.txt && "
         f"{crypto_setup_cmds()} && "
         f"{crypto_decrypt_script()} && "
@@ -741,157 +745,6 @@ def test_crypto(vock_dir, kernel_src, arch_info):
 
 
 
-
-
-def test_host(vock_dir, arch_info):
-    """Test on current host — no VM, no kernel build."""
-    print("\n" + "=" * 60)
-    print("  HOST TEST (no build, no VM)")
-    print("=" * 60)
-
-    vock = os.path.join(vock_dir, "vock")
-    run(["make", "-C", vock_dir, "CC=clang", "DEBUG_INFO_BTF=0", "-s"])
-    os.chdir(vock_dir)
-
-    # Coverage: hw mode
-    print("\n[hw coverage]")
-    if arch_info["has_intel_pt"] or arch_info["has_coresight"]:
-        cov = os.path.join(vock_dir, "kerncov.log")
-        html_out = os.path.join(vock_dir, "coverage.html")
-        if os.path.isfile(cov): os.remove(cov)
-        if os.path.isfile(html_out): os.remove(html_out)
-        r = run([vock, "-A", "2", "-B", "2", "--mode", "hw", "/bin/ls", "/tmp"], cwd=vock_dir)
-        if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-            pcs = len(open(cov).readlines())
-            log("PASS", f"hw coverage: {pcs} kernel PCs")
-        else:
-            log("FAIL", "hw mode failed")
-        if os.path.isfile(html_out) and os.path.getsize(html_out) > 0:
-            log("PASS", "coverage.html generated (-A 2 -B 2)")
-    else:
-        log("SKIP", f"no hw trace PMU ({arch_info['arch']})")
-
-    # Syscall: ptrace
-    print("\n[--syscall ptrace]")
-    for f in ["trace.log", "trace.syz"]:
-        if os.path.exists(f): os.remove(f)
-    r = run([vock, "--syscall", "ptrace", "/bin/ls", "/tmp"], cwd=vock_dir)
-    tlog = os.path.join(vock_dir, "trace.log")
-    if os.path.isfile(tlog) and os.path.getsize(tlog) > 0:
-        lines = len(open(tlog).readlines())
-        log("PASS", f"ptrace: trace.log ({lines} syscalls)")
-        content = open(tlog).read()
-        if ") = " in content:
-            log("PASS", "strace format: syscall(...) = retval")
-    else:
-        log("FAIL", "ptrace: no trace.log")
-
-    # Syscall: --syzlang shorthand
-    print("\n[--syzlang]")
-    for f in ["trace.log", "trace.syz"]:
-        if os.path.exists(f): os.remove(f)
-    r = run([vock, "--syzlang", "/bin/ls", "/tmp"], cwd=vock_dir)
-    tlog = os.path.join(vock_dir, "trace.log")
-    syz = os.path.join(vock_dir, "trace.syz")
-    if os.path.isfile(tlog) and os.path.isfile(syz):
-        content = open(syz).read()
-        lines = len(content.splitlines())
-        if ") = " in content:
-            log("PASS", f"--syzlang: {lines} syscalls (trace.log + trace.syz)")
-        else:
-            log("FAIL", "--syzlang: output not in strace format")
-    else:
-        log("FAIL", "--syzlang failed")
-
-    # Syscall: sud
-    print("\n[--syscall sud]")
-    for f in ["trace.log"]:
-        if os.path.exists(f): os.remove(f)
-    r = run([vock, "--syscall", "sud", "/bin/ls", "/tmp"], cwd=vock_dir)
-    out = (r.stdout or b"").decode() + (r.stderr or b"").decode()
-    tlog = os.path.join(vock_dir, "trace.log")
-    if "not yet implemented" in out:
-        log("SKIP", "sud: not yet implemented")
-    elif os.path.isfile(tlog) and os.path.getsize(tlog) > 0:
-        log("PASS", "sud: trace.log generated")
-    else:
-        log("PASS", "sud: working")
-
-    # Syscall: ebpf
-    print("\n[--syscall ebpf]")
-    for f in ["trace.log"]:
-        if os.path.exists(f): os.remove(f)
-    r = run([vock, "--syscall", "ebpf", "/bin/ls", "/tmp"], cwd=vock_dir)
-    out = (r.stdout or b"").decode() + (r.stderr or b"").decode()
-    if "not built" in out:
-        log("SKIP", "ebpf: not built (rebuild with make EBPF=1)")
-    elif "requires CONFIG_BPF" in out:
-        log("SKIP", "ebpf: kernel lacks BTF support")
-    elif "EPERM" in out or "Operation not permitted" in out:
-        log("SKIP", "ebpf: blocked by seccomp/permissions")
-    else:
-        tlog = os.path.join(vock_dir, "trace.log")
-        if os.path.isfile(tlog) and os.path.getsize(tlog) > 0:
-            content = open(tlog).read()
-            if ") = " in content:
-                log("PASS", f"ebpf: strace format ({len(content.splitlines())} syscalls)")
-            else:
-                log("FAIL", "ebpf: output not in strace format")
-        else:
-            log("FAIL", "ebpf: no trace.log produced")
-
-    # ── Combined: --mode hw + --syscall (coverage + trace simultaneously) ──
-    if arch_info["has_intel_pt"] or arch_info["has_coresight"]:
-        print("\n[--mode hw + --syscall ptrace + --syzlang]")
-        for f in ["trace.log", "trace.syz", "kerncov.log"]:
-            if os.path.isfile(f): os.remove(f)
-        r = run([vock, "--syzlang", "--mode", "hw", "/bin/ls", "/tmp"], cwd=vock_dir)
-        cov = os.path.join(vock_dir, "kerncov.log")
-        tlog = os.path.join(vock_dir, "trace.log")
-        syz = os.path.join(vock_dir, "trace.syz")
-        if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-            log("PASS", f"hw+syzlang: kerncov.log ({len(open(cov).readlines())} PCs)")
-        else:
-            log("FAIL", "hw+syzlang: no kerncov.log")
-        if os.path.isfile(tlog) and os.path.getsize(tlog) > 0 and ") = " in open(tlog).read():
-            log("PASS", f"hw+syzlang: trace.log ({len(open(tlog).readlines())} syscalls)")
-        else:
-            log("FAIL", "hw+syzlang: no trace.log")
-        if os.path.isfile(syz) and os.path.getsize(syz) > 0:
-            log("PASS", f"hw+syzlang: trace.syz ({len(open(syz).readlines())} syscalls)")
-        else:
-            log("FAIL", "hw+syzlang: no trace.syz")
-
-        print("\n[--mode hw + --syscall sud + --syzlang]")
-        for f in ["trace.log", "trace.syz", "kerncov.log"]:
-            if os.path.isfile(f): os.remove(f)
-        r = run([vock, "--syzlang", "--syscall", "sud", "--mode", "hw", "/bin/ls", "/tmp"], cwd=vock_dir)
-        out = (r.stdout or b"").decode() + (r.stderr or b"").decode()
-        cov = os.path.join(vock_dir, "kerncov.log")
-        tlog = os.path.join(vock_dir, "trace.log")
-        syz = os.path.join(vock_dir, "trace.syz")
-        if os.path.isfile(cov) and os.path.getsize(cov) > 0:
-            log("PASS", f"hw+sud: kerncov.log ({len(open(cov).readlines())} PCs)")
-        else:
-            log("FAIL", "hw+sud: no kerncov.log")
-        if os.path.isfile(tlog) and os.path.getsize(tlog) > 0:
-            log("PASS", f"hw+sud: trace.log ({len(open(tlog).readlines())} syscalls)")
-        else:
-            if "not yet implemented" in out:
-                log("SKIP", "hw+sud: sud not available")
-            else:
-                log("FAIL", "hw+sud: no trace.log")
-        if os.path.isfile(syz) and os.path.getsize(syz) > 0:
-            log("PASS", f"hw+sud: trace.syz ({len(open(syz).readlines())} syscalls)")
-        else:
-            if "not yet implemented" in out:
-                log("SKIP", "hw+sud: sud not available")
-            else:
-                log("FAIL", "hw+sud: no trace.syz")
-
-    return True
-
-
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -909,14 +762,18 @@ def main():
   7  crypto             --btf + --mode kcov + xts(aes) decrypt coverage
 
 --on target:
-  host      test on running host directly (no VM, no kernel build)
-  vng-kvm   boot test kernel in virtme-ng with KVM acceleration
-  vng-tcg   boot test kernel in virtme-ng with QEMU TCG (no KVM)
+  vng-kvm   VM tests use KVM acceleration (default)
+  vng-tcg   VM tests use QEMU TCG (CI, no KVM)
+
+Tests auto-select host or VM:
+  Tests 1,2,5,6,7  → run in vng (need custom kernel)
+  Test 3           → run on host (need bare metal Intel PT)
+  Test 4           → run on host (need bare metal CoreSight)
 
 defaults:
   --kernel-src   $HOME/stable
-  --on           host
-  (no number)    run all tests 1 + 2 + 3
+  --on           vng-kvm
+  (no number)    run all tests
 
 architecture:
   x86_64 (Intel)   Intel PT + kcov + all syscall engines
@@ -924,29 +781,37 @@ architecture:
   aarch64          CoreSight + kcov + all syscall engines
 
 examples:
-  vock selftest                          host test (default)
-  vock selftest --on vng-kvm             full test in KVM VM
-  vock selftest --on vng-tcg             full test in TCG VM (CI)
+  vock selftest                          run all tests (KVM)
+  vock selftest --on vng-tcg             run all tests (TCG, CI)
   vock selftest 1                        coverage + syscall engines
-  vock selftest 2                        syscall engines only
-  vock selftest 3                        Intel PT (x86_64, no KCOV)
-  vock selftest 4                        CoreSight (aarch64, no KCOV)
+  vock selftest 3                        Intel PT (bare metal)
   vock selftest 5                        filter + kcov + ebpf (netdev)
+  vock selftest --llvm -21               explicit LLVM version
   vock selftest --kernel-src ~/linux     custom kernel source
 """)
     parser.add_argument("test", nargs="?", choices=["1", "2", "3", "4", "5", "6", "7"],
                         help="run specific test number (default: all)")
-    parser.add_argument("--on", choices=["host", "vng-kvm", "vng-tcg"], default="host",
-                        help="execution target (default: host)")
+    parser.add_argument("--on", choices=["host", "vng-kvm", "vng-tcg"], default="vng-kvm",
+                        help="execution target (default: vng-kvm)")
     parser.add_argument("--kernel-src", default=None,
                         help="kernel source tree (default: $HOME/stable)")
+    parser.add_argument("--llvm", default=None,
+                        help="LLVM suffix (e.g. -21, -20). Overrides auto-detect. Env: LLVM=")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="show command output for debugging")
     args = parser.parse_args()
 
     kernel_src = args.kernel_src or os.path.join(os.path.expanduser("~"), "stable")
     vock_dir = find_vock_dir()
 
-    global LLVM_SUFFIX, RUN_TARGET
-    LLVM_SUFFIX = detect_llvm_suffix()
+    global LLVM_SUFFIX, RUN_TARGET, VERBOSE
+    VERBOSE = args.verbose
+    if args.llvm is not None:
+        LLVM_SUFFIX = args.llvm
+    elif os.environ.get("LLVM"):
+        LLVM_SUFFIX = os.environ["LLVM"]
+    else:
+        LLVM_SUFFIX = detect_llvm_suffix()
     arch_info = detect_arch()
 
     # Determine run target
@@ -976,39 +841,22 @@ examples:
         sys.exit(1)
 
     # Dispatch
-    if RUN_TARGET == "host":
-        if args.test is None:
-            test_host(vock_dir, arch_info)
-        elif args.test == "1":
-            test_host(vock_dir, arch_info)  # host only does host tests
-        elif args.test == "2":
-            test_host(vock_dir, arch_info)
-        elif args.test == "3":
-            test_host(vock_dir, arch_info)
+    # Dispatch — each test decides internally whether to use vng or host
+    tests = {
+        "1": lambda: test_default(vock_dir, kernel_src, arch_info, False),
+        "2": lambda: test_syscall_engines(vock_dir, kernel_src, arch_info),
+        "3": lambda: test_intel_pt(vock_dir, kernel_src, arch_info),
+        "4": lambda: test_coresight(vock_dir, kernel_src, arch_info),
+        "5": lambda: test_filter(vock_dir, kernel_src, arch_info),
+        "6": lambda: test_btf(vock_dir, kernel_src, arch_info),
+        "7": lambda: test_crypto(vock_dir, kernel_src, arch_info),
+    }
+
+    if args.test:
+        tests[args.test]()
     else:
-        # vng-kvm or vng-tcg
-        if args.test == "1":
-            test_default(vock_dir, kernel_src, arch_info, False)
-        elif args.test == "2":
-            test_syscall_engines(vock_dir, kernel_src, arch_info)
-        elif args.test == "3":
-            test_intel_pt(vock_dir, kernel_src, arch_info)
-        elif args.test == "4":
-            test_coresight(vock_dir, kernel_src, arch_info)
-        elif args.test == "5":
-            test_filter(vock_dir, kernel_src, arch_info)
-        elif args.test == "6":
-            test_btf(vock_dir, kernel_src, arch_info)
-        elif args.test == "7":
-            test_crypto(vock_dir, kernel_src, arch_info)
-        else:
-            test_default(vock_dir, kernel_src, arch_info, False)
-            test_syscall_engines(vock_dir, kernel_src, arch_info)
-            test_intel_pt(vock_dir, kernel_src, arch_info)
-            test_coresight(vock_dir, kernel_src, arch_info)
-            test_filter(vock_dir, kernel_src, arch_info)
-            test_btf(vock_dir, kernel_src, arch_info)
-            test_crypto(vock_dir, kernel_src, arch_info)
+        for t in tests.values():
+            t()
 
     # Summary
     print("\n" + "=" * 60)
