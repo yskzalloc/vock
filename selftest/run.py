@@ -258,10 +258,9 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         sud_pre = SUD_SETUP if backend == "sud" else ""
         r = vng_run(kernel_src, [
             "bash", "-c",
-            f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
             f"rm -f kerncov.log coverage.html trace.log && "
             f"{sud_pre}{crypto_prepare()} && "
-            f"./vock --mode kcov --syscall {backend} --vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
+            f"{vock_dir}/vock --mode kcov --syscall {backend} --vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"[ -f coverage.html ] && echo HTML_OK"
@@ -291,9 +290,9 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         sud_pre = SUD_SETUP if backend == "sud" else ""
         r = vng_run(kernel_src, [
             "bash", "-c",
-            f"cd {vock_dir} && rm -f kerncov.log coverage.html trace.log && "
+            f"rm -f kerncov.log coverage.html trace.log && "
             f"{sud_pre}{crypto_prepare()} && "
-            f"./vock --mode kcov --syscall {backend} --btf --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
+            f"{vock_dir}/vock --mode kcov --syscall {backend} --btf --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"[ -f coverage.html ] && echo HTML_OK"
@@ -355,9 +354,8 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         print(f"\n[--mode hw --syscall {backend}]")
         r = vng_run(kernel_src, [
             "bash", "-c",
-            f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
             f"rm -f kerncov.log trace.log && "
-            f"./vock --mode hw --syscall {backend} "
+            f"{vock_dir}/vock --mode hw --syscall {backend} "
             f"--vmlinux {vmlinux} --kernel-src {kernel_src} /bin/ls /tmp 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log)"
@@ -407,9 +405,8 @@ def test_coresight(vock_dir, kernel_src, arch_info):
     print("\n[Test: CoreSight]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
         f"rm -f kerncov.log && "
-        f"./vock --mode hw /bin/ls /tmp 2>&1; "
+        f"{vock_dir}/vock --mode hw /bin/ls /tmp 2>&1; "
         f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0)"
     ])
     out = r.stdout.decode() if r.stdout else ""
@@ -445,8 +442,8 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     print("\n[Test: --syscall ptrace]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{crypto_prepare()} && ./vock --syscall ptrace --mode kcov {CRYPTO_TARGET} 2>&1; "
+        f"rm -f trace.log trace.syz && "
+        f"{crypto_prepare()} && {vock_dir}/vock --syscall ptrace --mode kcov {CRYPTO_TARGET} 2>&1; "
         f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log) && "
         f"grep -q ') = ' trace.log && echo FMT_OK"
     ])
@@ -461,8 +458,8 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     print("\n[Test: --syzlang (implies --syscall)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{crypto_prepare()} && ./vock --syzlang --mode kcov {CRYPTO_TARGET} 2>&1; "
+        f"rm -f trace.log trace.syz && "
+        f"{crypto_prepare()} && {vock_dir}/vock --syzlang --mode kcov {CRYPTO_TARGET} 2>&1; "
         f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log) && "
         f"grep -q ') = ' trace.log && echo FMT_OK"
     ])
@@ -475,8 +472,8 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     print("\n[Test: --syscall sud]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{SUD_SETUP}{crypto_prepare()} && ./vock --syscall sud --mode kcov {CRYPTO_TARGET} 2>&1; "
+        f"rm -f trace.log trace.syz && "
+        f"{SUD_SETUP}{crypto_prepare()} && {vock_dir}/vock --syscall sud --mode kcov {CRYPTO_TARGET} 2>&1; "
         f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log)"
     ])
     out = r.stdout.decode() if r.stdout else ""
@@ -488,8 +485,8 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     print("\n[Test: --syscall ebpf]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && rm -f trace.log trace.syz && "
-        f"{crypto_prepare()} && ./vock --syscall ebpf --mode kcov {CRYPTO_TARGET} 2>&1; "
+        f"rm -f trace.log trace.syz && "
+        f"{crypto_prepare()} && {vock_dir}/vock --syscall ebpf --mode kcov {CRYPTO_TARGET} 2>&1; "
         f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log)"
     ])
     out = r.stdout.decode() if r.stdout else ""
@@ -540,9 +537,8 @@ def test_filter(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --syscall ebpf --filter net (veth create/destroy)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.html trace.log && "
-        f"./vock --mode kcov --syscall ebpf --filter net "
+        f"{vock_dir}/vock --mode kcov --syscall ebpf --filter net "
         f"--vmlinux {vmlinux} --kernel-src {kernel_src} "
         f"/bin/sh -c '{net_target}' 2>&1; "
         f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
@@ -575,7 +571,7 @@ def test_filter(vock_dir, kernel_src, arch_info):
     print("\n[Test: trace.log from --syscall ebpf]")
     r2 = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && [ -s trace.log ] && echo LINES=$(wc -l < trace.log) && "
+        f"[ -s trace.log ] && echo LINES=$(wc -l < trace.log) && "
         f"grep -q 'socket\\|sendmsg\\|ioctl' trace.log && echo NETDEV_SYSCALLS"
     ])
     out2 = r2.stdout.decode() if r2.stdout else ""
@@ -613,9 +609,8 @@ def test_btf(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --btf (crypto decrypt)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.txt && "
-        f"{crypto_prepare()} && ./vock --mode kcov --btf {CRYPTO_TARGET} 2>&1; "
+        f"{crypto_prepare()} && {vock_dir}/vock --mode kcov --btf {CRYPTO_TARGET} 2>&1; "
         f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
         f"[ -f coverage.txt ] && echo TXT_OK && "
         f"FUNCS=$(wc -l < coverage.txt) && echo FUNCS=$FUNCS"
@@ -648,7 +643,7 @@ def test_btf(vock_dir, kernel_src, arch_info):
     print("\n[Test: --btf + --vmlinux mutual exclusion]")
     r2 = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && ./vock --mode kcov --btf --vmlinux /dev/null {CRYPTO_TARGET} 2>&1; echo EXIT=$?"
+        f"{vock_dir}/vock --mode kcov --btf --vmlinux /dev/null {CRYPTO_TARGET} 2>&1; echo EXIT=$?"
     ])
     out2 = r2.stdout.decode() if r2.stdout else ""
     if "mutually exclusive" in out2 and "EXIT=1" in out2:
@@ -685,11 +680,10 @@ def test_crypto(vock_dir, kernel_src, arch_info):
     print("\n[Test: --mode kcov --btf (xts(aes) decrypt)]")
     r = vng_run(kernel_src, [
         "bash", "-c",
-        f"cd {vock_dir} && [ -x ./vock ] || make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
         f"rm -f kerncov.log coverage.txt && "
         f"{crypto_setup_cmds()} && "
         f"{crypto_decrypt_script()} && "
-        f"./vock --mode kcov --btf /bin/sh /tmp/dec.sh 2>&1; "
+        f"{vock_dir}/vock --mode kcov --btf /bin/sh /tmp/dec.sh 2>&1; "
         f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
         f"[ -f coverage.txt ] && echo TXT_OK && "
         f"grep -ic 'aes\\|xts\\|crypto\\|skcipher' coverage.txt && echo CRYPTO_FOUND && "
@@ -812,6 +806,20 @@ examples:
     print(f"  KVM:        {'available' if kvm_available() else 'unavailable'}")
     print(f"  Run on:     {RUN_TARGET}")
     print(f"  LLVM:       clang{LLVM_SUFFIX} (LLVM={LLVM_SUFFIX})")
+
+    # Build vock with all features enabled
+    print("\n[Build vock]")
+    r = run(["make", f"CC=clang{LLVM_SUFFIX}", "EBPF=1", "-j4"],
+            cwd=vock_dir, timeout=120)
+    if r.returncode != 0:
+        # Fallback without EBPF if libbpf not available
+        r = run(["make", f"CC=clang{LLVM_SUFFIX}", "-j4"],
+                cwd=vock_dir, timeout=120)
+    if r.returncode != 0:
+        print("  FATAL: cannot build vock")
+        vlog(r)
+        sys.exit(1)
+    print("  vock built")
 
     if not os.path.isdir(kernel_src):
         print(f"\n  FATAL: kernel source not found at {kernel_src}")

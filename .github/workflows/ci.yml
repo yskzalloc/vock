@@ -12,13 +12,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Install dependencies and setup environment
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y clang flex bison bc dwarves pahole libelf-dev \
           libssl-dev kmod libncurses-dev git python3-pip python3-venv \
           qemu-system libbpf-dev \
-          kcapi-tools # For the kernel crypto subsystem coverage test
+          kcapi-tools # For kernel crypto subsystem coverage test
 
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
@@ -37,7 +37,7 @@ jobs:
           echo "VM_TARGET=vng-tcg" >> $GITHUB_ENV
         fi
 
-    - name: "Test 1: kernel coverage hw"
+    - name: "Test 1: coverage + syscall engines"
       run: |
         source venv-virtme/bin/activate
         ./vock selftest 1 --on $VM_TARGET --kernel-src staging
@@ -47,13 +47,8 @@ jobs:
         source venv-virtme/bin/activate
         ./vock selftest 2 --on $VM_TARGET --kernel-src staging
 
-    - name: "Test 5: filter (kcov + ebpf + ip addr show)"
+    - name: "Test 3: hw (hw + ebpf + veth)"
       run: |
         source venv-virtme/bin/activate
-        ./vock selftest 5 --on $VM_TARGET --kernel-src staging
-
-    - name: "Test 6: btf (kcov + kallsyms resolution)"
-      run: |
-        source venv-virtme/bin/activate
-        ./vock selftest 6 --on $VM_TARGET --kernel-src staging
+        ./vock selftest 3 --on $VM_TARGET --kernel-src staging
 
