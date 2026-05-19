@@ -67,7 +67,7 @@ def main():
 
     # BTF mode: resolve via /proc/kallsyms, no vmlinux needed
     if args.btf:
-        from report.btf import generate_btf_report
+        from report.btf import generate_btf_report, generate_btf_html
         ranked = generate_btf_report(addrs)
         if not args.quiet:
             print(f"\n\033[93m📊 [VOCK] BTF report ({len(addrs)} PCs → {len(ranked)} functions)\033[0m\n")
@@ -78,12 +78,21 @@ def main():
             if len(ranked) > 50:
                 print(f"  ... and {len(ranked)-50} more functions")
             print(f"\n\033[92m✓ {len(ranked)} kernel functions covered\033[0m")
-        # Write simple text report
-        with open(args.output.replace(".html", ".txt"), "w") as f:
-            for name, hits in ranked:
-                f.write(f"{name}\t{hits}\n")
-        if not args.quiet:
-            print(f"\033[92m✓ Written: {args.output.replace('.html', '.txt')}\033[0m")
+
+        # Generate HTML with highlighted source lines if kernel-src available
+        kernel_src = args.kernel_src if args.kernel_src != DEFAULT_KERNEL_SRC else None
+        if kernel_src and os.path.isdir(kernel_src):
+            generate_btf_html(ranked, kernel_src, args.output)
+            if not args.quiet:
+                print(f"\033[92m✓ Written: {args.output} (source-highlighted)\033[0m")
+        else:
+            # Fallback: text-only report
+            txt_path = args.output.replace(".html", ".txt")
+            with open(txt_path, "w") as f:
+                for name, hits in ranked:
+                    f.write(f"{name}\t{hits}\n")
+            if not args.quiet:
+                print(f"\033[92m✓ Written: {txt_path}\033[0m")
         return
 
     # KASLR detection

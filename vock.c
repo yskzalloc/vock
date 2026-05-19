@@ -555,8 +555,8 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 	/* Privilege check */
-	if (btf && (vmlinux || kernel_src)) {
-		fprintf(stderr, "error: --btf is mutually exclusive with --vmlinux/--kernel-src\n");
+	if (btf && vmlinux) {
+		fprintf(stderr, "error: --btf is mutually exclusive with --vmlinux\n");
 		return 1;
 	}
 	if (mode == MODE_KCOV) {
