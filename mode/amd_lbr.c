@@ -51,6 +51,25 @@ int amd_lbr_start(struct vock_hw_ctx *ctx, pid_t pid)
 	ctx->amd_lbr = 1;
 	ctx->perf_fd = syscall(__NR_perf_event_open, &attr, pid, -1, -1, 0);
 	if (ctx->perf_fd < 0) {
+		/* Fallback: IP-only sampling (older kernels without LBR) */
+		memset(&attr, 0, sizeof(attr));
+		attr.size = sizeof(attr);
+		attr.type = PERF_TYPE_HARDWARE;
+		attr.config = PERF_COUNT_HW_CPU_CYCLES;
+		attr.disabled = 1;
+		attr.exclude_kernel = 0;
+		attr.exclude_user = 1;
+		attr.sample_period = 4000;
+		attr.sample_type = PERF_SAMPLE_IP;
+		attr.wakeup_events = 1;
+
+		ctx->perf_fd = syscall(__NR_perf_event_open, &attr, pid, -1, -1, 0);
+		if (ctx->perf_fd < 0) {
+			perror("amd_lbr: perf_event_open (fallback)");
+			return -1;
+		}
+	}
+	if (ctx->perf_fd < 0) {
 		perror("amd_lbr: perf_event_open");
 		return -1;
 	}
@@ -89,23 +108,28 @@ int amd_lbr_decode(struct vock_hw_ctx *ctx)
 			unsigned char *p = (unsigned char *)ev + sizeof(*ev);
 			uint64_t ip = *(uint64_t *)p;
 			p += 8;
-			uint64_t nr = *(uint64_t *)p;
-			p += 8;
+
 			if (ip >= 0xffff800000000000ULL) {
 				fprintf(f, "0x%lx\n", ip);
 				pc_count++;
 			}
-			for (uint64_t i = 0; i < nr && i < 32; i++) {
-				uint64_t from = *(uint64_t *)p;
-				uint64_t to = *(uint64_t *)(p + 8);
-				p += 24; /* from, to, flags */
-				if (from >= 0xffff800000000000ULL) {
-					fprintf(f, "0x%lx\n", from);
-					pc_count++;
-				}
-				if (to >= 0xffff800000000000ULL) {
-					fprintf(f, "0x%lx\n", to);
-					pc_count++;
+
+			/* Branch stack if available (size > just IP) */
+			if (ev->size > sizeof(*ev) + 8 + 8) {
+				uint64_t nr = *(uint64_t *)p;
+				p += 8;
+				for (uint64_t i = 0; i < nr && i < 32; i++) {
+					uint64_t from = *(uint64_t *)p;
+					uint64_t to = *(uint64_t *)(p + 8);
+					p += 24;
+					if (from >= 0xffff800000000000ULL) {
+						fprintf(f, "0x%lx\n", from);
+						pc_count++;
+					}
+					if (to >= 0xffff800000000000ULL) {
+						fprintf(f, "0x%lx\n", to);
+						pc_count++;
+					}
 				}
 			}
 		}
@@ -113,6 +137,6 @@ int amd_lbr_decode(struct vock_hw_ctx *ctx)
 	}
 	header->data_tail = head;
 	fclose(f);
-	fprintf(stderr, "[vock] AMD LBR: %d kernel PCs sampled\n", pc_count);
+	fprintf(stderr, "[vock] AMD hw: %d kernel PCs sampled\n", pc_count);
 	return pc_count > 0 ? 0 : -1;
 }
