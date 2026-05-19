@@ -120,26 +120,6 @@ struct perf_ring {
 	int fd;
 };
 
-static int perf_ring_open(struct perf_ring *ring)
-{
-	struct perf_event_attr attr = {};
-	attr.size = sizeof(attr);
-	attr.type = PERF_TYPE_SOFTWARE;
-	attr.config = PERF_COUNT_SW_BPF_OUTPUT;
-	attr.sample_type = PERF_SAMPLE_RAW;
-	attr.wakeup_events = 1;
-
-	ring->fd = syscall(__NR_perf_event_open, &attr, -1, 0, -1, PERF_FLAG_FD_CLOEXEC);
-	if (ring->fd < 0) return -1;
-
-	size_t mmap_sz = (RING_PAGES + 1) * 4096;
-	ring->header = mmap(NULL, mmap_sz, PROT_READ | PROT_WRITE, MAP_SHARED, ring->fd, 0);
-	if (ring->header == MAP_FAILED) { close(ring->fd); return -1; }
-	ring->data = (char *)ring->header + 4096;
-
-	ioctl(ring->fd, PERF_EVENT_IOC_ENABLE, 0);
-	return 0;
-}
 
 /* ─── Tracepoint attach ───────────────────────────────────────────────────── */
 
@@ -164,14 +144,22 @@ static int attach_tp(int prog_fd, int tp_id_val)
 	struct perf_event_attr attr = {};
 	attr.size = sizeof(attr);
 	attr.type = PERF_TYPE_TRACEPOINT;
+	attr.disabled = 0;
 	attr.config = tp_id_val;
 	attr.sample_type = PERF_SAMPLE_RAW;
 
-	int efd = syscall(__NR_perf_event_open, &attr, -1, 0, -1, 0);
-	if (efd < 0) return -1;
-	ioctl(efd, PERF_EVENT_IOC_SET_BPF, prog_fd);
-	ioctl(efd, PERF_EVENT_IOC_ENABLE, 0);
-	return efd;
+	/* Attach on all CPUs */
+	int ncpus = sysconf(_SC_NPROCESSORS_ONLN);
+	int ok = 0;
+	for (int cpu = 0; cpu < ncpus; cpu++) {
+		int efd = syscall(__NR_perf_event_open, &attr, -1, cpu, -1, 0);
+		if (efd < 0) continue;
+		if (ioctl(efd, PERF_EVENT_IOC_SET_BPF, prog_fd) < 0) { close(efd); continue; }
+		ioctl(efd, PERF_EVENT_IOC_ENABLE, 0);
+		ok++;
+		/* Don't close — keep alive for duration */
+	}
+	return ok > 0 ? 0 : -1;
 }
 
 /* ─── BPF programs (hand-crafted bytecode) ────────────────────────────────── */
@@ -239,14 +227,13 @@ static struct bpf_insn prog_enter[] = {
 	BPF_LDX_MEM(BPF_DW, BPF_REG_1, BPF_REG_6, 56),
 	BPF_STX_MEM(BPF_DW, BPF_REG_10, BPF_REG_1, -24),
 	BPF_ST_MEM(BPF_DW, BPF_REG_10, -16, 0), /* event.ret = 0 */
-	/* perf_event_output(ctx, map, BPF_F_CURRENT_CPU, &event, sizeof(event)) */
-	BPF_MOV64_REG(BPF_REG_1, BPF_REG_6), /* ctx */
-	BPF_LD_MAP_FD(BPF_REG_2, 2), /* perf_map placeholder */
-	BPF_MOV64_IMM(BPF_REG_3, 0xFFFFFFFF), /* BPF_F_CURRENT_CPU */
-	BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -80),
-	BPF_MOV64_IMM(BPF_REG_5, 80), /* sizeof(event) */
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, 25), /* bpf_perf_event_output */
+	/* bpf_ringbuf_output(map, data, size, flags) */
+	BPF_LD_MAP_FD(BPF_REG_1, 2),
+	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -80),
+	BPF_MOV64_IMM(BPF_REG_3, 80),
+	BPF_MOV64_IMM(BPF_REG_4, 0),
+	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, 130),
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_EXIT_INSN(),
 };
@@ -282,14 +269,13 @@ static struct bpf_insn prog_exit[] = {
 	BPF_ST_MEM(BPF_DW, BPF_REG_10, -40, 0),
 	BPF_ST_MEM(BPF_DW, BPF_REG_10, -32, 0),
 	BPF_ST_MEM(BPF_DW, BPF_REG_10, -24, 0),
-	/* perf_event_output */
-	BPF_MOV64_REG(BPF_REG_1, BPF_REG_6),
-	BPF_LD_MAP_FD(BPF_REG_2, 2), /* perf_map */
-	BPF_MOV64_IMM(BPF_REG_3, 0xFFFFFFFF),
-	BPF_MOV64_REG(BPF_REG_4, BPF_REG_10),
-	BPF_ALU64_IMM(BPF_ADD, BPF_REG_4, -80),
-	BPF_MOV64_IMM(BPF_REG_5, 80),
-	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, 25),
+	/* bpf_ringbuf_output(map, data, size, flags) */
+	BPF_LD_MAP_FD(BPF_REG_1, 2),
+	BPF_MOV64_REG(BPF_REG_2, BPF_REG_10),
+	BPF_ALU64_IMM(BPF_ADD, BPF_REG_2, -80),
+	BPF_MOV64_IMM(BPF_REG_3, 80),
+	BPF_MOV64_IMM(BPF_REG_4, 0),
+	BPF_RAW_INSN(BPF_JMP | BPF_CALL, 0, 0, 0, 130),
 	BPF_MOV64_IMM(BPF_REG_0, 0),
 	BPF_EXIT_INSN(),
 };
@@ -340,7 +326,6 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 {
 	int pid_map_fd, perf_map_fd, enter_fd, exit_fd;
 	int enter_efd, exit_efd;
-	struct perf_ring ring = {};
 	pid_t pid;
 	int status;
 
@@ -355,7 +340,7 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 	pid_map_fd = bpf_create_map(BPF_MAP_TYPE_HASH, 4, 4, 1);
 	if (pid_map_fd < 0) { perror("ebpf: pid map"); return -1; }
 
-	perf_map_fd = bpf_create_map(BPF_MAP_TYPE_PERF_EVENT_ARRAY, 4, 4, sysconf(_SC_NPROCESSORS_ONLN));
+	perf_map_fd = bpf_create_map(BPF_MAP_TYPE_RINGBUF, 0, 0, 256 * 1024);
 	if (perf_map_fd < 0) { perror("ebpf: perf map"); close(pid_map_fd); return -1; }
 
 	/* Patch map FDs into programs */
@@ -389,13 +374,23 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 	unsigned int key = 0, val = (unsigned int)pid;
 	bpf_map_update(pid_map_fd, &key, &val);
 
-	/* Open perf ring and register in perf map */
-	if (perf_ring_open(&ring) < 0) {
-		fprintf(stderr, "ebpf: perf ring open failed\n");
+	/* mmap ringbuf: consumer page (RW) + producer+data (RO) */
+	#define RINGBUF_SZ (256 * 1024)
+	void *cons_page = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, perf_map_fd, 0);
+	if (cons_page == MAP_FAILED) {
+		perror("ebpf: ringbuf consumer mmap");
 		kill(pid, SIGKILL); waitpid(pid, NULL, 0);
 		return -1;
 	}
-	bpf_map_update(perf_map_fd, &key, &ring.fd);
+	void *prod_pages = mmap(NULL, 4096 + RINGBUF_SZ, PROT_READ, MAP_SHARED, perf_map_fd, 4096);
+	if (prod_pages == MAP_FAILED) {
+		perror("ebpf: ringbuf producer mmap");
+		kill(pid, SIGKILL); waitpid(pid, NULL, 0);
+		return -1;
+	}
+	unsigned long *cons_pos = (unsigned long *)cons_page;
+	unsigned long *prod_pos = (unsigned long *)prod_pages;
+	void *ring_data = (char *)prod_pages + 4096;
 
 	/* Attach to tracepoints */
 	int enter_id = tp_id("sys_enter");
@@ -420,50 +415,42 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 	g_output = fopen(output_path, "w");
 	if (!g_output) g_output = stdout;
 
-	/* Poll for events until child exits */
-	struct pollfd pfd = { .fd = ring.fd, .events = POLLIN };
+	/* Poll ringbuf for events until child exits */
+	struct pollfd pfd = { .fd = perf_map_fd, .events = POLLIN };
 	while (1) {
 		int ret = waitpid(pid, &status, WNOHANG);
 		if (ret > 0) break;
-
 		poll(&pfd, 1, 10);
-
-		/* Read events from ring */
-		volatile struct perf_event_mmap_page *hdr = ring.header;
-		uint64_t head = hdr->data_head;
-		uint64_t tail = hdr->data_tail;
 		__sync_synchronize();
-
-		while (tail < head) {
-			char *base = (char *)ring.data;
-			struct perf_event_header *ev = (void *)(base + (tail % RING_SIZE));
-			if (ev->type == PERF_RECORD_SAMPLE) {
-				/* sample: size(u32) + data */
-				uint32_t *p = (uint32_t *)((char *)ev + sizeof(*ev));
-				uint32_t sz = *p++;
-				if (sz >= sizeof(struct event)) {
-					struct event *e = (struct event *)p;
-					if (!e->is_exit) {
-						g_pending_nr = e->nr;
-						memcpy(g_pending_args, e->args, sizeof(g_pending_args));
-						g_has_pending = 1;
-					} else if (g_has_pending && g_pending_nr == e->nr) {
-						emit_strace(g_pending_nr, g_pending_args, e->ret);
-						g_has_pending = 0;
-					}
+		unsigned long cons = *cons_pos;
+		unsigned long prod = *prod_pos;
+		while (cons < prod) {
+			void *rec = (char *)ring_data + (cons % RINGBUF_SZ);
+			uint32_t hdr = *(uint32_t *)rec;
+			uint32_t len = (hdr >> 4) & 0x0FFFFFFF;
+			if (hdr & 1) break; /* BPF_RINGBUF_BUSY_BIT */
+			if (len >= sizeof(struct event)) {
+				struct event *e = (struct event *)((char *)rec + 8);
+				if (!e->is_exit) {
+					g_pending_nr = e->nr;
+					memcpy(g_pending_args, e->args, sizeof(g_pending_args));
+					g_has_pending = 1;
+				} else if (g_has_pending && g_pending_nr == e->nr) {
+					emit_strace(g_pending_nr, g_pending_args, e->ret);
+					g_has_pending = 0;
 				}
 			}
-			tail += ev->size;
+			cons += 8 + ((len + 7) & ~7UL); /* 8-byte header + aligned data */
 		}
-		hdr->data_tail = head;
+		__sync_synchronize();
+		*cons_pos = cons;
 	}
 
 	if (g_output != stdout) fclose(g_output);
 	fprintf(stderr, "[vock] ebpf trace written to %s\n", output_path);
 
-	close(enter_efd); close(exit_efd);
+	
 	close(enter_fd); close(exit_fd);
 	close(pid_map_fd); close(perf_map_fd);
-	close(ring.fd);
 	return 0;
 }
