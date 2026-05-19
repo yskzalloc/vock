@@ -3,16 +3,6 @@ CFLAGS += -Wall -O2
 LDFLAGS += -lm
 
 DEBUG_INFO_BTF ?= $(shell [ -e /sys/kernel/btf/vmlinux ] && echo 1 || echo 0)
-EBPF ?= 0
-
-ifeq ($(EBPF),1)
-  ifneq ($(wildcard syscall/ebpf/trace.skel.h),)
-    CFLAGS += -DVOCK_EBPF_ENABLED=1
-    LDFLAGS += -lbpf -lelf -lz
-  else
-    $(warning EBPF=1 but syscall/ebpf/trace.skel.h missing. Run: make ebpf-gen)
-  endif
-endif
 
 ifeq ($(DEBUG_INFO_BTF),1)
   CFLAGS += -DDEBUG_INFO_BTF=1
@@ -52,25 +42,3 @@ $(TARGET_LIB): $(LIB_SOURCE)
 sud-libs:
 	$(MAKE) -C syscall/sud CC=$(CC) || echo "[warn] SUD build failed (--syscall sud unavailable)"
 
-.PHONY: ebpf-gen
-ebpf-gen:
-	$(MAKE) -C syscall/ebpf generate || echo "[warn] eBPF BPF program build failed (--syscall ebpf still works if pre-built)"
-
-.PHONY: install
-install: all
-	@echo "Installing $(TOOL_NAME)..."
-	sudo mkdir -p /usr/local/lib/$(TOOL_NAME)
-	sudo cp $(TARGET_EXE) $(TARGET_LIB) output.py /usr/local/lib/$(TOOL_NAME)/
-	sudo cp -r mode/ report/ /usr/local/lib/$(TOOL_NAME)/
-	sudo ln -sf /usr/local/lib/$(TOOL_NAME)/$(TARGET_EXE) /usr/local/bin/$(TOOL_NAME)
-	@echo "Installed."
-
-.PHONY: uninstall
-uninstall:
-	sudo rm -f /usr/local/bin/$(TOOL_NAME)
-	sudo rm -rf /usr/local/lib/$(TOOL_NAME)
-
-.PHONY: clean
-clean:
-	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS)
-	$(MAKE) -C syscall/sud clean
