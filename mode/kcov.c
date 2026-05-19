@@ -22,8 +22,12 @@ struct kcov_remote_arg {
 #define KCOV_REMOTE_ENABLE	_IOW('c', 102, struct kcov_remote_arg)
 #endif
 
+#ifndef KCOV_SUBSYSTEM_COMMON
 #define KCOV_SUBSYSTEM_COMMON	(0x00ULL << 56)
+#endif
+#ifndef KCOV_INSTANCE_MASK
 #define KCOV_INSTANCE_MASK	(0xffffffffULL)
+#endif
 
 static inline uint64_t vock_kcov_handle(uint64_t subsys, uint64_t inst)
 {
