@@ -416,6 +416,10 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 	if (!g_output) g_output = stdout;
 
 	/* Poll ringbuf for events until child exits */
+	#define BPF_RINGBUF_BUSY_BIT (1U << 31)
+	#define BPF_RINGBUF_DISCARD_BIT (1U << 30)
+	#define BPF_RINGBUF_HDR_SZ 8
+
 	struct pollfd pfd = { .fd = perf_map_fd, .events = POLLIN };
 	while (1) {
 		int ret = waitpid(pid, &status, WNOHANG);
@@ -425,12 +429,14 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 		unsigned long cons = *cons_pos;
 		unsigned long prod = *prod_pos;
 		while (cons < prod) {
-			void *rec = (char *)ring_data + (cons % RINGBUF_SZ);
-			uint32_t hdr = *(uint32_t *)rec;
-			uint32_t len = (hdr >> 4) & 0x0FFFFFFF;
-			if (hdr & 1) break; /* BPF_RINGBUF_BUSY_BIT */
-			if (len >= sizeof(struct event)) {
-				struct event *e = (struct event *)((char *)rec + 8);
+			uint32_t *len_ptr = (uint32_t *)((char *)ring_data + (cons & (RINGBUF_SZ - 1)));
+			uint32_t hdr = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
+			if (hdr & BPF_RINGBUF_BUSY_BIT) break;
+			/* roundup_len: clear top 2 bits, add hdr, align to 8 */
+			uint32_t data_len = (hdr << 2) >> 2;
+			uint32_t rec_len = (data_len + BPF_RINGBUF_HDR_SZ + 7) / 8 * 8;
+			if (!(hdr & BPF_RINGBUF_DISCARD_BIT) && data_len >= sizeof(struct event)) {
+				struct event *e = (struct event *)((char *)len_ptr + BPF_RINGBUF_HDR_SZ);
 				if (!e->is_exit) {
 					g_pending_nr = e->nr;
 					memcpy(g_pending_args, e->args, sizeof(g_pending_args));
@@ -440,10 +446,36 @@ int vock_ebpf_run(int argc, char *argv[], int cmd_idx,
 					g_has_pending = 0;
 				}
 			}
-			cons += 8 + ((len + 7) & ~7UL); /* 8-byte header + aligned data */
+			cons += rec_len;
 		}
-		__sync_synchronize();
-		*cons_pos = cons;
+		__atomic_store_n(cons_pos, cons, __ATOMIC_RELEASE);
+	}
+
+	/* Final drain */
+	__sync_synchronize();
+	{
+		unsigned long cons = *cons_pos;
+		unsigned long prod = *prod_pos;
+		while (cons < prod) {
+			uint32_t *len_ptr = (uint32_t *)((char *)ring_data + (cons & (RINGBUF_SZ - 1)));
+			uint32_t hdr = __atomic_load_n(len_ptr, __ATOMIC_ACQUIRE);
+			if (hdr & BPF_RINGBUF_BUSY_BIT) break;
+			uint32_t data_len = (hdr << 2) >> 2;
+			uint32_t rec_len = (data_len + BPF_RINGBUF_HDR_SZ + 7) / 8 * 8;
+			if (!(hdr & BPF_RINGBUF_DISCARD_BIT) && data_len >= sizeof(struct event)) {
+				struct event *e = (struct event *)((char *)len_ptr + BPF_RINGBUF_HDR_SZ);
+				if (!e->is_exit) {
+					g_pending_nr = e->nr;
+					memcpy(g_pending_args, e->args, sizeof(g_pending_args));
+					g_has_pending = 1;
+				} else if (g_has_pending && g_pending_nr == e->nr) {
+					emit_strace(g_pending_nr, g_pending_args, e->ret);
+					g_has_pending = 0;
+				}
+			}
+			cons += rec_len;
+		}
+		__atomic_store_n(cons_pos, cons, __ATOMIC_RELEASE);
 	}
 
 	if (g_output != stdout) fclose(g_output);
