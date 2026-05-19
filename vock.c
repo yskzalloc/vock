@@ -597,44 +597,48 @@ int main(int argc, char *argv[])
 		};
 		return vock_fuzz_run(&fopts);
 	}
-	/* Run syscall tracing first if requested */
-	if (syscall_on) {
-		if (!strcmp(syscall_backend, "ptrace")) {
-			int ret = run_ptrace_mode(argc, argv, cmd_idx, syzlang_on);
-			if (ret)
-				return ret;
-		} else if (!strcmp(syscall_backend, "sud")) {
+	/* Run syscall tracing:
+	 * - SUD/eBPF: run BEFORE coverage (they're independent, fast)
+	 * - ptrace: run AFTER coverage (ptrace blocks, would prevent kcov)
+	 */
+	if (syscall_on && strcmp(syscall_backend, "ptrace") != 0) {
+		if (!strcmp(syscall_backend, "sud")) {
 			if (!vock_sud_available()) {
 				fprintf(stderr, "error: SUD requires kernel >= 5.11\n");
 				return 1;
 			}
-			int ret = vock_sud_run(argc, argv, cmd_idx, "trace.log");
-			if (ret)
-				return ret;
-			if (syzlang_on) {
-				vock_copy_file("trace.log", "trace.syz");
-				fprintf(stderr, "[vock] syzlang output written to trace.syz\n");
-			}
+			vock_sud_run(argc, argv, cmd_idx, "trace.log");
 		} else if (!strcmp(syscall_backend, "ebpf")) {
 			if (!vock_ebpf_available()) {
 				fprintf(stderr, "error: eBPF requires CONFIG_BPF + BTF\n");
 				return 1;
 			}
 			int ret = vock_ebpf_run(argc, argv, cmd_idx, "trace.log");
-			if (ret)
+			if (ret < 0)
 				return ret;
-			if (syzlang_on) {
-				vock_copy_file("trace.log", "trace.syz");
-				fprintf(stderr, "[vock] syzlang output written to trace.syz\n");
-			}
+		}
+		if (syzlang_on) {
+			vock_copy_file("trace.log", "trace.syz");
+			fprintf(stderr, "[vock] syzlang output written to trace.syz\n");
 		}
 	}
 	(void)syzlang_on;
+
+	/* Run coverage mode */
+	int cov_ret = 1;
 	switch (mode) {
 	case MODE_KCOV:
-		return run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
+		cov_ret = run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
+		break;
 	case MODE_HW:
-		return run_hw_mode(argc, argv, cmd_idx, vmlinux, kernel_src, filter, btf, ctx_after, ctx_before);
+		cov_ret = run_hw_mode(argc, argv, cmd_idx, vmlinux, kernel_src, filter, btf, ctx_after, ctx_before);
+		break;
 	}
-	return 1;
+
+	/* Run ptrace AFTER coverage (ptrace blocks, so it runs target again) */
+	if (syscall_on && !strcmp(syscall_backend, "ptrace")) {
+		run_ptrace_mode(argc, argv, cmd_idx, syzlang_on);
+	}
+
+	return cov_ret;
 }

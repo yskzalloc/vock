@@ -18,7 +18,7 @@ jobs:
         sudo apt-get install -y clang flex bison bc dwarves pahole libelf-dev \
           libssl-dev kmod libncurses-dev git python3-pip python3-venv \
           qemu-system libbpf-dev \
-          libkcapi-tools # For the kernel crypto subsystem coverage test
+          kcapi-tools # For the kernel crypto subsystem coverage test
 
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
