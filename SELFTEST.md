@@ -7,10 +7,9 @@ Automated test framework. Configures kernels, builds, boots VMs, and verifies ea
 ```bash
 # VM tests (need kernel source)
 vock selftest 1 --on vng-kvm --kernel-src ~/net
-vock selftest 2 --on vng-kvm --kernel-src ~/net
 
-# Bare metal tests (need Intel PT hardware)
-vock selftest 3 --kernel-src ~/net
+# Bare metal tests (need Intel PT / AMD LBR hardware)
+vock selftest 2 --kernel-src ~/net
 
 # CI (no KVM available)
 vock selftest 1 --on vng-tcg --kernel-src ~/net
@@ -19,7 +18,7 @@ vock selftest 1 --on vng-tcg --kernel-src ~/net
 ## Options
 
 ```
-vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] [1-7]
+vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] [1-6]
 ```
 
 | Option | Default | Description |
@@ -27,43 +26,44 @@ vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] 
 | `--on` | `vng-kvm` | VM acceleration for tests that need vng |
 | `--kernel-src` | `$HOME/stable` | Kernel source tree |
 | `--llvm` | auto-detect | LLVM suffix (e.g. `-21`). Also reads `LLVM` env |
-| `1`-`7` | all | Run specific test only |
+| `1`-`6` | all | Run specific test only |
 
 ## Test Numbers
 
 | # | Name | Runs on | What |
 |---|------|---------|------|
-| 1 | Coverage + Syscall | vng | KCOV+vmlinux, KCOV+BTF × each --syscall |
-| 2 | Syscall engines | vng | ptrace/sud/ebpf + syzlang format check |
-| 3 | Intel PT | **host** | HW + vmlinux × each --syscall (ptrace/sud/ebpf) |
-| 4 | CoreSight | **host** | aarch64 HW trace, KCOV disabled |
-| 5 | Filter + netdev | vng | `--filter net` + veth create/configure/destroy |
-| 6 | BTF | vng | `--btf --kernel-src` + HTML report |
-| 7 | Crypto | vng | xts(aes) decrypt coverage + verification |
+| 1 | Coverage + Syscall + Syzlang | vng | KCOV+vmlinux, KCOV+BTF × each --syscall + --syzlang |
+| 2 | Intel PT / AMD LBR | **host** | HW + vmlinux × each --syscall (ptrace/sud/ebpf) |
+| 3 | CoreSight | **host** | aarch64 HW trace, KCOV disabled |
+| 4 | Filter + netdev | vng | `--filter net` + veth create/configure/destroy |
+| 5 | BTF | vng | `--btf --kernel-src` + HTML report |
+| 6 | Crypto | vng | xts(aes) decrypt coverage + verification |
 
-## Test 1: Coverage + Syscall (vng)
+## Test 1: Coverage + Syscall + Syzlang (vng)
 
 Builds one kernel, runs 2 groups:
 
-### Group A: KCOV + vmlinux + each `--syscall`
+### Group A: KCOV + vmlinux + syzlang + each `--syscall`
 
 ```
---mode kcov --syscall ptrace --vmlinux  → kerncov.log + trace.log + coverage.html
---mode kcov --syscall sud --vmlinux     → kerncov.log + trace.log + coverage.html
---mode kcov --syscall ebpf --vmlinux    → kerncov.log + trace.log + coverage.html
+--mode kcov --syzlang --syscall ptrace --vmlinux  → kerncov.log + trace.log + trace.syz + coverage.html
+--mode kcov --syzlang --syscall sud --vmlinux     → kerncov.log + trace.log + trace.syz + coverage.html
+--mode kcov --syzlang --syscall ebpf --vmlinux    → kerncov.log + trace.log + trace.syz + coverage.html
 ```
 
-### Group B: KCOV + BTF + kernel-src + each `--syscall`
+### Group B: KCOV + BTF + kernel-src + syzlang + each `--syscall`
 
 ```
---mode kcov --syscall ptrace --btf --kernel-src  → kerncov.log + trace.log + coverage.html
---mode kcov --syscall sud --btf --kernel-src     → kerncov.log + trace.log + coverage.html
---mode kcov --syscall ebpf --btf --kernel-src    → kerncov.log + trace.log + coverage.html
+--mode kcov --syzlang --syscall ptrace --btf --kernel-src  → kerncov.log + trace.log + trace.syz + coverage.html
+--mode kcov --syzlang --syscall sud --btf --kernel-src     → kerncov.log + trace.log + trace.syz + coverage.html
+--mode kcov --syzlang --syscall ebpf --btf --kernel-src    → kerncov.log + trace.log + trace.syz + coverage.html
 ```
 
-## Test 3: Intel PT (host, bare metal)
+Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0.
 
-Requires Intel PT hardware. Skipped on AMD/KVM.
+## Test 2: Intel PT / AMD LBR (host, bare metal)
+
+Requires Intel PT or AMD LBR hardware. Skipped if unavailable.
 
 ```
 --mode hw --syscall ptrace --vmlinux  → kerncov.log + trace.log
@@ -75,8 +75,8 @@ Requires Intel PT hardware. Skipped on AMD/KVM.
 
 | Test | Target | Kernel subsystem |
 |------|--------|-----------------|
-| 1, 2, 6, 7 | xts(aes) decrypt | crypto (skcipher, aes, xts) |
-| 5 | veth create/up/mtu/destroy | netdev (rtnl_newlink, dev_change_flags) |
+| 1, 5, 6 | xts(aes) decrypt | crypto (skcipher, aes, xts) |
+| 4 | veth create/up/mtu/destroy | netdev (rtnl_newlink, dev_change_flags) |
 
 ## Kernel Configuration
 
@@ -111,9 +111,9 @@ vng LLVM=-21 --build
 | `--mode hw` | `PERF_EVENTS`, `CPU_SUP_INTEL` |
 | `--mode kcov` | `KCOV`, `KCOV_INSTRUMENT_ALL`, `DEBUG_INFO` |
 | `--btf` | `DEBUG_INFO_BTF` |
-| `--syscall ebpf` | `BPF_SYSCALL`, `DEBUG_INFO_BTF` |
 | `--syscall ptrace` | (none) |
 | `--syscall sud` | (none, kernel ≥ 5.11) |
+| `--syscall ebpf` | `BPF_SYSCALL`, `DEBUG_INFO_BTF` |
 | crypto target | `CRYPTO_XTS`, `CRYPTO_USER`, `CRYPTO_USER_API_SKCIPHER` |
 | netdev target | `VETH`, `NET`, `INET` |
 
@@ -133,5 +133,4 @@ LLVM=-21 vock selftest 1 --kernel-src ~/net
   run: |
     if [ -w /dev/kvm ]; then ON=vng-kvm; else ON=vng-tcg; fi
     ./vock selftest 1 --on $ON --kernel-src $PWD/staging
-    ./vock selftest 2 --on $ON --kernel-src $PWD/staging
 ```
