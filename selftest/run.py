@@ -498,6 +498,87 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
 
 # ─── --host: Quick test on running host ──────────────────────────────────────
 
+# ─── Test 5: Filter (--filter netdev, --mode kcov, --syscall ebpf) ───────────
+
+def test_filter(vock_dir, kernel_src, arch_info):
+    """Test --filter with kcov + ebpf using ip addr show, verify netdev subsystem."""
+    print("\n" + "=" * 60)
+    print("  TEST 5: --filter (kcov + ebpf + ip addr show)")
+    print("=" * 60)
+
+    print("\n[Configure]")
+    configs = {
+        "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
+        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_BPF_SYSCALL": True,
+        "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_DWARF5": True, "CONFIG_DEBUG_INFO_NONE": False,
+        "CONFIG_NET": True, "CONFIG_INET": True,
+        "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
+    }
+    if not kernel_set_config(kernel_src, configs):
+        log("FAIL", "cannot configure kernel"); return False
+    log("PASS", "kernel configured (KCOV + BTF + NET)")
+
+    print("\n[Build]")
+    if not kernel_build(kernel_src):
+        log("FAIL", "kernel build failed"); return False
+    log("PASS", "kernel built")
+
+    vmlinux = os.path.join(kernel_src, "vmlinux")
+
+    print("\n[Test: --mode kcov --syscall ebpf --filter net /bin/ip addr show]")
+    r = vng_run(kernel_src, [
+        "bash", "-c",
+        f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 EBPF=1 -s 2>/dev/null; "
+        f"rm -f kerncov.log coverage.html trace.log && "
+        f"./vock --mode kcov --syscall ebpf --filter net "
+        f"--vmlinux {vmlinux} --kernel-src {kernel_src} "
+        f"/bin/ip addr show 2>&1; "
+        f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
+        f"[ -f coverage.html ] && echo HTML_OK && "
+        f"grep -c 'net/' coverage.html && echo NET_FOUND"
+    ])
+    out = r.stdout.decode() if r.stdout else ""
+
+    if "KCOV_PCS=" in out:
+        pcs = out.split("KCOV_PCS=")[1].split()[0]
+        if int(pcs) > 0:
+            log("PASS", f"--mode kcov + --syscall ebpf: {pcs} kernel PCs")
+        else:
+            log("FAIL", "--mode kcov: no coverage from ip addr show")
+    else:
+        log("FAIL", "--mode kcov --syscall ebpf: command failed")
+        if out: print(f"    {out[:300]}")
+
+    if "HTML_OK" in out:
+        log("PASS", "coverage.html generated")
+    else:
+        log("FAIL", "coverage.html missing")
+
+    if "NET_FOUND" in out:
+        log("PASS", "--filter net: netdev subsystem paths in report")
+    else:
+        log("FAIL", "--filter net: no net/ paths in coverage report")
+
+    # Verify trace.log was produced (ebpf syscall tracing)
+    print("\n[Test: trace.log from --syscall ebpf]")
+    r2 = vng_run(kernel_src, [
+        "bash", "-c",
+        f"cd {vock_dir} && [ -s trace.log ] && echo LINES=$(wc -l < trace.log) && "
+        f"grep -q 'socket\\|sendmsg\\|ioctl' trace.log && echo NETDEV_SYSCALLS"
+    ])
+    out2 = r2.stdout.decode() if r2.stdout else ""
+    if "LINES=" in out2:
+        log("PASS", f"--syscall ebpf trace: {out2.split('LINES=')[1].split()[0]} syscalls")
+    else:
+        log("FAIL", "--syscall ebpf: no trace.log")
+    if "NETDEV_SYSCALLS" in out2:
+        log("PASS", "netdev syscalls (socket/sendmsg/ioctl) captured")
+
+    return True
+
+
+
 def test_host(vock_dir, arch_info):
     """Test on current host — no VM, no kernel build."""
     print("\n" + "=" * 60)
@@ -659,6 +740,7 @@ def main():
   2  syscall engines    test --syscall ptrace/sud/ebpf + --syzlang
   3  intel_pt           build kernel WITHOUT KCOV, test Intel PT (x86_64 only)
   4  coresight          build kernel WITHOUT KCOV, test CoreSight (aarch64 only)
+  5  filter             --filter net + --mode kcov + --syscall ebpf (ip addr show)
 
 --on target:
   host      test on running host directly (no VM, no kernel build)
@@ -683,9 +765,10 @@ examples:
   vock selftest 2                        syscall engines only
   vock selftest 3                        Intel PT (x86_64, no KCOV)
   vock selftest 4                        CoreSight (aarch64, no KCOV)
+  vock selftest 5                        filter + kcov + ebpf (netdev)
   vock selftest --kernel-src ~/linux     custom kernel source
 """)
-    parser.add_argument("test", nargs="?", choices=["1", "2", "3", "4"],
+    parser.add_argument("test", nargs="?", choices=["1", "2", "3", "4", "5"],
                         help="run specific test number (default: all)")
     parser.add_argument("--on", choices=["host", "vng-kvm", "vng-tcg"], default="host",
                         help="execution target (default: host)")
@@ -746,11 +829,14 @@ examples:
             test_intel_pt(vock_dir, kernel_src, arch_info)
         elif args.test == "4":
             test_coresight(vock_dir, kernel_src, arch_info)
+        elif args.test == "5":
+            test_filter(vock_dir, kernel_src, arch_info)
         else:
             test_default(vock_dir, kernel_src, arch_info, False)
             test_syscall_engines(vock_dir, kernel_src, arch_info)
             test_intel_pt(vock_dir, kernel_src, arch_info)
             test_coresight(vock_dir, kernel_src, arch_info)
+            test_filter(vock_dir, kernel_src, arch_info)
 
     # Summary
     print("\n" + "=" * 60)

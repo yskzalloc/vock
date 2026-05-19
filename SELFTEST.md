@@ -46,6 +46,7 @@ vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH] [1|2|3|4]
 | kcov + sud | Combined |
 | kcov + ebpf | Combined (needs CONFIG_BPF + BTF) |
 | syzlang format | Verify strace-compatible output |
+| filter + kcov + ebpf | `--filter net` with `ip addr show`, verify netdev paths |
 
 ## Kernel Configuration
 
@@ -101,6 +102,7 @@ echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 | 2 | Syscall only | All backends, format verification |
 | 3 | Intel PT (no KCOV) | Proves hw mode works independently |
 | 4 | CoreSight (aarch64) | ARM64 hardware trace |
+| 5 | Filter | `--filter net` + `--mode kcov` + `--syscall ebpf` with `ip addr show` |
 
 ## GitHub CI
 
