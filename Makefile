@@ -6,8 +6,12 @@ DEBUG_INFO_BTF ?= $(shell [ -e /sys/kernel/btf/vmlinux ] && echo 1 || echo 0)
 EBPF ?= 0
 
 ifeq ($(EBPF),1)
-  CFLAGS += -DVOCK_EBPF_ENABLED=1
-  LDFLAGS += -lbpf -lelf -lz
+  ifneq ($(wildcard syscall/ebpf/trace.skel.h),)
+    CFLAGS += -DVOCK_EBPF_ENABLED=1
+    LDFLAGS += -lbpf -lelf -lz
+  else
+    $(warning EBPF=1 but syscall/ebpf/trace.skel.h missing. Run: make ebpf-gen)
+  endif
 endif
 
 ifeq ($(DEBUG_INFO_BTF),1)
@@ -33,7 +37,7 @@ else
 endif
 
 .PHONY: all
-all: $(TARGET_EXE) $(TARGET_LIB) sud-libs $(if $(filter 1,$(EBPF)),ebpf-gen)
+all: $(TARGET_EXE) $(TARGET_LIB) sud-libs
 
 $(TARGET_EXE): $(EXE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -50,7 +54,7 @@ sud-libs:
 
 .PHONY: ebpf-gen
 ebpf-gen:
-	$(MAKE) -C syscall/ebpf generate
+	$(MAKE) -C syscall/ebpf generate || echo "[warn] eBPF BPF program build failed (--syscall ebpf still works if pre-built)"
 
 .PHONY: install
 install: all
