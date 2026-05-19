@@ -160,8 +160,34 @@ See [SELFTEST.md](SELFTEST.md) for kernel configuration and VM testing details.
 
 ```bash
 make                    # default (no eBPF)
-make EBPF=1             # with eBPF backend (needs libbpf-dev)
+make EBPF=1             # with eBPF backend (needs libbpf ≥ 0.7)
 make CC=clang           # use clang
+```
+
+### eBPF with old libbpf (Ubuntu 22.04 / libbpf < 0.7)
+
+If `make EBPF=1` fails with undefined references, build libbpf locally:
+
+```bash
+# Install libbpf from source (no sudo)
+git clone --depth 1 https://github.com/libbpf/libbpf.git
+cd libbpf/src && BUILD_STATIC_ONLY=y DESTDIR=~/libbpf-install make install
+
+# Generate BPF skeleton
+cd vock/syscall/ebpf
+bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+clang -O2 -g -target bpf -I ~/libbpf-install/usr/include -c trace.bpf.c -o trace.bpf.o
+bpftool gen skeleton trace.bpf.o > trace.skel.h
+
+# Build vock
+cd vock
+make CC=clang EBPF=1 \
+  "CFLAGS+=-I$HOME/libbpf-install/usr/include" \
+  "LDFLAGS+=-L$HOME/libbpf-install/usr/lib64"
+
+# Run (set library path)
+export LD_LIBRARY_PATH=~/libbpf-install/usr/lib64
+./vock --syscall ebpf /bin/ls /tmp
 ```
 
 ## License
