@@ -131,8 +131,7 @@ def kernel_set_config(kernel_src, configs):
 def kernel_build(kernel_src):
     """Build kernel using vng --build (handles 9p/VFS properly)."""
     print("  Building kernel...")
-    llvm_flag = f"LLVM={LLVM_SUFFIX}"
-    r = run(["vng", llvm_flag, "--build"], cwd=kernel_src, timeout=1800)
+    r = run(["vng", f"LLVM={LLVM_SUFFIX}", "--build"], cwd=kernel_src, timeout=1800)
     return r.returncode == 0
 
 
@@ -809,11 +808,16 @@ examples:
 
     # Build vock with all features enabled
     print("\n[Build vock]")
-    r = run(["make", f"CC=clang{LLVM_SUFFIX}", "EBPF=1", "-j4"],
+    if "/" in LLVM_SUFFIX:
+        # LLVM is a path (e.g. ~/llvm-project/build/bin)
+        cc = os.path.join(os.path.expanduser(LLVM_SUFFIX), "clang")
+    else:
+        cc = f"clang{LLVM_SUFFIX}"
+    r = run(["make", f"CC={cc}", "EBPF=1", "-j4"],
             cwd=vock_dir, timeout=120)
     if r.returncode != 0:
         # Fallback without EBPF
-        r = run(["make", f"CC=clang{LLVM_SUFFIX}", "-j4"],
+        r = run(["make", f"CC={cc}", "-j4"],
                 cwd=vock_dir, timeout=120)
     if r.returncode != 0:
         print("  FATAL: cannot build vock")
