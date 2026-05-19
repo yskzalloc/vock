@@ -45,6 +45,8 @@ def parse_args():
     p.add_argument("-A", type=int, default=4, help="context lines after")
     p.add_argument("-B", type=int, default=4, help="context lines before")
     p.add_argument("-o", "--output", default="coverage.html")
+    p.add_argument("--btf", action="store_true",
+                   help="resolve PCs via /proc/kallsyms (no vmlinux needed)")
     return p.parse_args()
 
 
@@ -61,6 +63,27 @@ def main():
     if not addrs:
         if not args.quiet:
             print("\033[93mno coverage data found\033[0m")
+        return
+
+    # BTF mode: resolve via /proc/kallsyms, no vmlinux needed
+    if args.btf:
+        from report.btf import generate_btf_report
+        ranked = generate_btf_report(addrs)
+        if not args.quiet:
+            print(f"\n\033[93m📊 [VOCK] BTF report ({len(addrs)} PCs → {len(ranked)} functions)\033[0m\n")
+            print(f"  {'Function':<50} {'Hits':>6}")
+            print(f"  {'─'*50} {'─'*6}")
+            for name, hits in ranked[:50]:
+                print(f"  {name:<50} {hits:>6}")
+            if len(ranked) > 50:
+                print(f"  ... and {len(ranked)-50} more functions")
+            print(f"\n\033[92m✓ {len(ranked)} kernel functions covered\033[0m")
+        # Write simple text report
+        with open(args.output.replace(".html", ".txt"), "w") as f:
+            for name, hits in ranked:
+                f.write(f"{name}\t{hits}\n")
+        if not args.quiet:
+            print(f"\033[92m✓ Written: {args.output.replace('.html', '.txt')}\033[0m")
         return
 
     # KASLR detection

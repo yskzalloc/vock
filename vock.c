@@ -73,7 +73,7 @@ static int run_report(const char *report_path,
 		      const char *kernel_src,
 		      const char *vmlinux,
 		      const char *filter,
-		      int ctx_after, int ctx_before)
+		      int btf, int ctx_after, int ctx_before)
 {
 	char *argv_exec[24];
 	int idx = 0;
@@ -82,6 +82,9 @@ static int run_report(const char *report_path,
 	char a_buf[16], b_buf[16];
 	argv_exec[idx++] = (char *)"python3";
 	argv_exec[idx++] = (char *)report_path;
+	if (btf) {
+		argv_exec[idx++] = (char *)"--btf";
+	}
 	if (kernel_src) {
 		argv_exec[idx++] = (char *)"--kernel-src";
 		argv_exec[idx++] = (char *)kernel_src;
@@ -122,7 +125,7 @@ static int run_report(const char *report_path,
 }
 static int run_kcov_mode(int argc, char *argv[], int cmd_idx,
 			 const char *kernel_src, const char *vmlinux,
-			 const char *filter, int ctx_after, int ctx_before)
+			 const char *filter, int btf, int ctx_after, int ctx_before)
 {
 	char exe_path[1024];
 	char *exe_dir;
@@ -169,14 +172,14 @@ static int run_kcov_mode(int argc, char *argv[], int cmd_idx,
 	close(rfd);
 	fprintf(stderr, "[vock] generating report\n");
 	snprintf(report_path, sizeof(report_path), "%s/output.py", exe_dir);
-	ret = run_report(report_path, kernel_src, vmlinux, filter, ctx_after, ctx_before);
+	ret = run_report(report_path, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
 	if (ret)
 		fprintf(stderr, "report: exit code %d\n", ret);
 	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 static int run_hw_mode(int argc, char *argv[], int cmd_idx, const char *vmlinux,
 		       const char *kernel_src, const char *filter,
-		       int ctx_after, int ctx_before)
+		       int btf, int ctx_after, int ctx_before)
 {
 	struct vock_hw_ctx ctx;
 	pid_t pid;
@@ -225,7 +228,7 @@ static int run_hw_mode(int argc, char *argv[], int cmd_idx, const char *vmlinux,
 			exe_path[n] = '\0';
 			char *dir = dirname(exe_path);
 			snprintf(report_path, sizeof(report_path), "%s/output.py", dir);
-			run_report(report_path, kernel_src, vmlinux, filter, ctx_after, ctx_before);
+			run_report(report_path, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
 		}
 	}
 	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
@@ -299,6 +302,7 @@ int main(int argc, char *argv[])
 	char *kernel_src = NULL;
 	char *vmlinux = NULL;
 	char *filter = NULL;
+	int btf = 0;
 	enum vock_mode mode = MODE_HW;
 	int syscall_on = 0;
 	int syzlang_on = 0;
@@ -356,6 +360,7 @@ int main(int argc, char *argv[])
 "options:\n"
 "  --kernel-src PATH   kernel source for coverage report\n"
 "  --vmlinux FILE      vmlinux with debug info\n"
+"  --btf               resolve PCs via /proc/kallsyms (no vmlinux needed)\n"
 "  --filter KW         filter coverage report to matching paths\n"
 "  -A N, -B N          context lines in coverage report\n"
 "\n"
@@ -372,6 +377,8 @@ int main(int argc, char *argv[])
 			kernel_src = argv[++i];
 		} else if (!strcmp(argv[i], "--vmlinux") && i + 1 < argc) {
 			vmlinux = argv[++i];
+		} else if (!strcmp(argv[i], "--btf")) {
+			btf = 1;
 		} else if (!strcmp(argv[i], "--filter") && i + 1 < argc) {
 			filter = argv[++i];
 		} else if (!strcmp(argv[i], "-A") && i + 1 < argc) {
@@ -548,6 +555,10 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 	/* Privilege check */
+	if (btf && (vmlinux || kernel_src)) {
+		fprintf(stderr, "error: --btf is mutually exclusive with --vmlinux/--kernel-src\n");
+		return 1;
+	}
 	if (mode == MODE_KCOV) {
 		if (geteuid() != 0) {
 			fprintf(stderr,
@@ -620,9 +631,9 @@ int main(int argc, char *argv[])
 	(void)syzlang_on;
 	switch (mode) {
 	case MODE_KCOV:
-		return run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, ctx_after, ctx_before);
+		return run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
 	case MODE_HW:
-		return run_hw_mode(argc, argv, cmd_idx, vmlinux, kernel_src, filter, ctx_after, ctx_before);
+		return run_hw_mode(argc, argv, cmd_idx, vmlinux, kernel_src, filter, btf, ctx_after, ctx_before);
 	}
 	return 1;
 }

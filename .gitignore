@@ -12,3 +12,4 @@ syscall/ebpf/trace.bpf.o
 syscall/ebpf/trace.skel.h
 *.html
 *.log
+*.txt

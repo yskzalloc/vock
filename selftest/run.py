@@ -578,6 +578,81 @@ def test_filter(vock_dir, kernel_src, arch_info):
     return True
 
 
+# ─── Test 6: BTF (--btf, --mode kcov, resolve via kallsyms) ─────────────────
+
+def test_btf(vock_dir, kernel_src, arch_info):
+    """Test --btf: resolve PCs via /proc/kallsyms without vmlinux."""
+    print("\n" + "=" * 60)
+    print("  TEST 6: --btf (kcov + kallsyms resolution)")
+    print("=" * 60)
+
+    print("\n[Configure]")
+    configs = {
+        "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
+        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO_DWARF5": True,
+        "CONFIG_DEBUG_INFO_NONE": False,
+        "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
+    }
+    if not kernel_set_config(kernel_src, configs):
+        log("FAIL", "cannot configure kernel"); return False
+    log("PASS", "kernel configured (KCOV + BTF)")
+
+    print("\n[Build]")
+    if not kernel_build(kernel_src):
+        log("FAIL", "kernel build failed"); return False
+    log("PASS", "kernel built")
+
+    print("\n[Test: --mode kcov --btf /bin/ls /tmp]")
+    r = vng_run(kernel_src, [
+        "bash", "-c",
+        f"cd {vock_dir} && make CC=clang DEBUG_INFO_BTF=0 -s 2>/dev/null; "
+        f"rm -f kerncov.log coverage.txt && "
+        f"./vock --mode kcov --btf /bin/ls /tmp 2>&1; "
+        f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
+        f"[ -f coverage.txt ] && echo TXT_OK && "
+        f"FUNCS=$(wc -l < coverage.txt) && echo FUNCS=$FUNCS"
+    ])
+    out = r.stdout.decode() if r.stdout else ""
+
+    if "KCOV_PCS=" in out:
+        pcs = out.split("KCOV_PCS=")[1].split()[0]
+        if int(pcs) > 0:
+            log("PASS", f"--mode kcov: {pcs} kernel PCs collected")
+        else:
+            log("FAIL", "--mode kcov: no coverage")
+    else:
+        log("FAIL", "--btf: command failed")
+        if out: print(f"    {out[:300]}")
+
+    if "TXT_OK" in out:
+        log("PASS", "coverage.txt generated (BTF report)")
+    else:
+        log("FAIL", "coverage.txt missing")
+
+    if "FUNCS=" in out:
+        funcs = out.split("FUNCS=")[1].split()[0]
+        if int(funcs) > 0:
+            log("PASS", f"--btf: {funcs} functions resolved via kallsyms")
+        else:
+            log("FAIL", "--btf: no functions resolved")
+
+    # Verify mutual exclusion
+    print("\n[Test: --btf + --vmlinux mutual exclusion]")
+    r2 = vng_run(kernel_src, [
+        "bash", "-c",
+        f"cd {vock_dir} && ./vock --mode kcov --btf --vmlinux /dev/null /bin/ls /tmp 2>&1; echo EXIT=$?"
+    ])
+    out2 = r2.stdout.decode() if r2.stdout else ""
+    if "mutually exclusive" in out2 and "EXIT=1" in out2:
+        log("PASS", "--btf + --vmlinux correctly rejected")
+    else:
+        log("FAIL", "mutual exclusion not enforced")
+
+    return True
+
+
+
 
 def test_host(vock_dir, arch_info):
     """Test on current host — no VM, no kernel build."""
@@ -741,6 +816,7 @@ def main():
   3  intel_pt           build kernel WITHOUT KCOV, test Intel PT (x86_64 only)
   4  coresight          build kernel WITHOUT KCOV, test CoreSight (aarch64 only)
   5  filter             --filter net + --mode kcov + --syscall ebpf (ip addr show)
+  6  btf                --btf + --mode kcov (resolve via /proc/kallsyms)
 
 --on target:
   host      test on running host directly (no VM, no kernel build)
@@ -768,7 +844,7 @@ examples:
   vock selftest 5                        filter + kcov + ebpf (netdev)
   vock selftest --kernel-src ~/linux     custom kernel source
 """)
-    parser.add_argument("test", nargs="?", choices=["1", "2", "3", "4", "5"],
+    parser.add_argument("test", nargs="?", choices=["1", "2", "3", "4", "5", "6"],
                         help="run specific test number (default: all)")
     parser.add_argument("--on", choices=["host", "vng-kvm", "vng-tcg"], default="host",
                         help="execution target (default: host)")
@@ -831,12 +907,15 @@ examples:
             test_coresight(vock_dir, kernel_src, arch_info)
         elif args.test == "5":
             test_filter(vock_dir, kernel_src, arch_info)
+        elif args.test == "6":
+            test_btf(vock_dir, kernel_src, arch_info)
         else:
             test_default(vock_dir, kernel_src, arch_info, False)
             test_syscall_engines(vock_dir, kernel_src, arch_info)
             test_intel_pt(vock_dir, kernel_src, arch_info)
             test_coresight(vock_dir, kernel_src, arch_info)
             test_filter(vock_dir, kernel_src, arch_info)
+            test_btf(vock_dir, kernel_src, arch_info)
 
     # Summary
     print("\n" + "=" * 60)
