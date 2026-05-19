@@ -10,6 +10,7 @@ struct vock_hw_ctx {
 	size_t mmap_size;
 	void *aux_buf;
 	size_t aux_size;
+	int amd_lbr;  /* 1 if using AMD LBR sampling instead of Intel PT */
 };
 
 int vock_hw_trace_init(struct vock_hw_ctx *ctx);

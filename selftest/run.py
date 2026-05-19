@@ -37,7 +37,7 @@ def kvm_available():
 def detect_arch():
     """Detect micro-architecture details."""
     arch = platform.machine()
-    info = {"arch": arch, "has_intel_pt": False, "has_coresight": False, "cpu": ""}
+    info = {"arch": arch, "has_intel_pt": False, "has_amd_lbr": False, "has_coresight": False, "cpu": ""}
     if arch == "x86_64":
         try:
             for line in open("/proc/cpuinfo"):
@@ -45,11 +45,15 @@ def detect_arch():
                     info["cpu"] = line.split(":")[1].strip()
                     break
             flags = ""
+            vendor = ""
             for line in open("/proc/cpuinfo"):
                 if line.startswith("flags"):
                     flags = line
-                    break
+                if line.startswith("vendor_id"):
+                    vendor = line.split(":")[1].strip()
             info["has_intel_pt"] = "intel_pt" in flags
+            if "AuthenticAMD" in vendor:
+                info["has_amd_lbr"] = True
         except:
             pass
         # Runtime check
@@ -317,18 +321,19 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
 # ─── Test 3: Intel PT (x86_64, KCOV disabled) ───────────────────────────────
 
 def test_intel_pt(vock_dir, kernel_src, arch_info):
-    """Test Intel PT without KCOV (x86_64 only)."""
+    """Test hardware trace: Intel PT or AMD LBR (x86_64 only)."""
     print("\n" + "=" * 60)
-    print("  TEST 3: Intel PT (KCOV disabled)")
+    print("  TEST 3: Hardware Trace (Intel PT / AMD LBR)")
     print("=" * 60)
 
     if arch_info["arch"] != "x86_64":
-        log("SKIP", "Intel PT: not x86_64")
+        log("SKIP", "HW trace: not x86_64")
         return True
-    if not arch_info["has_intel_pt"]:
-        log("SKIP", f"Intel PT: not available ({arch_info['cpu'] or 'unknown CPU'})")
+    if not arch_info["has_intel_pt"] and not arch_info.get("has_amd_lbr"):
+        log("SKIP", f"HW trace: not available ({arch_info['cpu'] or 'unknown CPU'})")
         return True
-    log("PASS", f"Intel PT supported ({arch_info['cpu']})")
+    hw_type = "Intel PT" if arch_info["has_intel_pt"] else "AMD LBR"
+    log("PASS", f"{hw_type} supported ({arch_info['cpu']})")
 
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": False,
@@ -802,6 +807,7 @@ examples:
     if arch_info["cpu"]:
         print(f"  CPU:        {arch_info['cpu']}")
     print(f"  Intel PT:   {'yes' if arch_info['has_intel_pt'] else 'no'}")
+    print(f"  AMD LBR:    {'yes' if arch_info.get('has_amd_lbr') else 'no'}")
     print(f"  CoreSight:  {'yes' if arch_info['has_coresight'] else 'no'}")
     print(f"  KVM:        {'available' if kvm_available() else 'unavailable'}")
     print(f"  Run on:     {RUN_TARGET}")

@@ -1,10 +1,12 @@
+/* Hardware trace dispatcher.
+ * Auto-selects: Intel PT → full trace, AMD → LBR sampling, ARM → CoreSight.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -12,6 +14,7 @@
 #include <sys/syscall.h>
 #include "hw.h"
 #include "pt_decode.h"
+#include "amd_lbr.h"
 
 #define AUX_SIZE (4 * 1024 * 1024)
 #define MMAP_PAGES 1
@@ -21,6 +24,8 @@ int vock_hw_trace_available(void)
 	if (access("/sys/bus/event_source/devices/intel_pt", F_OK) == 0)
 		return 1;
 	if (access("/sys/bus/event_source/devices/cs_etm", F_OK) == 0)
+		return 1;
+	if (amd_lbr_available())
 		return 1;
 	return 0;
 }
@@ -43,19 +48,21 @@ int vock_hw_trace_start(struct vock_hw_ctx *ctx, pid_t pid)
 	char buf[64];
 	size_t mmap_size;
 
+	/* Try Intel PT / CoreSight first */
 	f = fopen("/sys/bus/event_source/devices/intel_pt/type", "r");
 	if (!f)
 		f = fopen("/sys/bus/event_source/devices/cs_etm/type", "r");
-	if (!f) {
-		fprintf(stderr, "hw_trace: no hardware trace PMU found\n");
-		return -1;
+	if (f) {
+		if (fgets(buf, sizeof(buf), f))
+			type = atoi(buf);
+		fclose(f);
 	}
-	if (fgets(buf, sizeof(buf), f))
-		type = atoi(buf);
-	fclose(f);
-	if (type < 0)
-		return -1;
 
+	/* AMD fallback: use LBR sampling */
+	if (type < 0)
+		return amd_lbr_start(ctx, pid);
+
+	/* Intel PT / CoreSight setup */
 	memset(&attr, 0, sizeof(attr));
 	attr.size = sizeof(attr);
 	attr.type = type;
@@ -64,14 +71,13 @@ int vock_hw_trace_start(struct vock_hw_ctx *ctx, pid_t pid)
 	attr.exclude_user = 1;
 
 	ctx->pid = pid;
-	/* Attach to the specific pid on any CPU */
+	ctx->amd_lbr = 0;
 	ctx->perf_fd = syscall(__NR_perf_event_open, &attr, pid, -1, -1, 0);
 	if (ctx->perf_fd < 0) {
 		perror("hw_trace: perf_event_open");
 		return -1;
 	}
 
-	/* mmap ring buffer */
 	mmap_size = (MMAP_PAGES + 1) * 4096;
 	ctx->base = mmap(NULL, mmap_size, PROT_READ | PROT_WRITE,
 			 MAP_SHARED, ctx->perf_fd, 0);
@@ -83,7 +89,7 @@ int vock_hw_trace_start(struct vock_hw_ctx *ctx, pid_t pid)
 	}
 	ctx->mmap_size = mmap_size;
 
-	/* Setup aux area */
+	/* Aux area for PT/CoreSight trace data */
 	struct perf_event_mmap_page *header = ctx->base;
 	header->aux_offset = mmap_size;
 	header->aux_size = ctx->aux_size;
@@ -118,7 +124,15 @@ int vock_hw_trace_decode(struct vock_hw_ctx *ctx, const char *vmlinux)
 	unsigned char *data;
 	int pc_count = 0;
 
-	if (ctx->base == MAP_FAILED || ctx->aux_buf == MAP_FAILED)
+	if (ctx->base == MAP_FAILED)
+		return -1;
+
+	/* AMD LBR: dispatch to dedicated decoder */
+	if (ctx->amd_lbr)
+		return amd_lbr_decode(ctx);
+
+	/* Intel PT / CoreSight: decode from aux buffer */
+	if (ctx->aux_buf == MAP_FAILED)
 		return -1;
 
 	header = (struct perf_event_mmap_page *)ctx->base;

@@ -12,8 +12,8 @@ endif
 
 TOOL_NAME = vock
 TARGET_EXE = vock
-EXE_SOURCES = vock.c mode/hw.c mode/pt_decode.c syscall/ptrace/ptrace.c syscall/sud/sud.c syscall/ebpf/ebpf.c syscall/decode.c syzlang/syzlang.c fuzz/fuzz.c fuzz/covset.c fuzz/signal.c fuzz/mutate.c fuzz/state.c prog2c/prog2c.c execprog/execprog.c
-EXE_OBJS = vock.o mode/hw.o mode/pt_decode.o syscall/ptrace/ptrace.o syscall/sud/sud.o syscall/ebpf/ebpf.o syscall/decode.o syzlang/syzlang.o fuzz/fuzz.o fuzz/covset.o fuzz/signal.o fuzz/mutate.o fuzz/state.o prog2c/prog2c.o execprog/execprog.o
+EXE_SOURCES = vock.c mode/hw.c mode/pt_decode.c mode/amd_lbr.c syscall/ptrace/ptrace.c syscall/sud/sud.c syscall/ebpf/ebpf.c syscall/decode.c syzlang/syzlang.c fuzz/fuzz.c fuzz/covset.c fuzz/signal.c fuzz/mutate.c fuzz/state.c prog2c/prog2c.c execprog/execprog.c
+EXE_OBJS = vock.o mode/hw.o mode/pt_decode.o mode/amd_lbr.o syscall/ptrace/ptrace.o syscall/sud/sud.o syscall/ebpf/ebpf.o syscall/decode.o syzlang/syzlang.o fuzz/fuzz.o fuzz/covset.o fuzz/signal.o fuzz/mutate.o fuzz/state.o prog2c/prog2c.o execprog/execprog.o
 
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),aarch64)
