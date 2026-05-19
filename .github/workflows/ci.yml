@@ -29,6 +29,11 @@ jobs:
         git clone -b staging-testing --depth 1 \
           https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
 
+
+    - name: Build vock
+      run: |
+        make CC=clang EBPF=1
+
     - name: Detect VM target
       run: |
         if [ -w /dev/kvm ]; then
