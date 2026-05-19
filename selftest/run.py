@@ -266,14 +266,14 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         ])
         vlog(r)
         out = r.stdout.decode() if r.stdout else ""
-        if "KCOV_PCS=" in out:
+        if "ebpf backend not built" in out:
+            log("SKIP", f"kcov+{backend}+vmlinux: ebpf not built")
+        elif "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
             if int(pcs) > 0:
                 log("PASS", f"kcov+{backend}+vmlinux: {pcs} PCs")
             else:
                 log("FAIL", f"kcov+{backend}+vmlinux: no coverage")
-        elif "not built" in out:
-            log("SKIP", f"kcov+{backend}+vmlinux: ebpf not built")
         else:
             log("FAIL", f"kcov+{backend}+vmlinux: failed")
         if "TRACE_OK=" in out:
@@ -298,14 +298,14 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         ])
         vlog(r)
         out = r.stdout.decode() if r.stdout else ""
-        if "KCOV_PCS=" in out:
+        if "ebpf backend not built" in out:
+            log("SKIP", f"kcov+{backend}+btf: ebpf not built")
+        elif "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
             if int(pcs) > 0:
                 log("PASS", f"kcov+{backend}+btf: {pcs} PCs")
             else:
                 log("FAIL", f"kcov+{backend}+btf: no coverage")
-        elif "not built" in out:
-            log("SKIP", f"kcov+{backend}+btf: ebpf not built")
         else:
             log("FAIL", f"kcov+{backend}+btf: failed")
         if "TRACE_OK=" in out:
@@ -491,7 +491,7 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     out = r.stdout.decode() if r.stdout else ""
     if "LINES=" in out:
         log("PASS", f"--syscall ebpf: {out.split('LINES=')[1].split()[0]} syscalls")
-    elif "not built" in out:
+    elif "ebpf backend not built" in out:
         log("SKIP", "--syscall ebpf: not built (make EBPF=1)")
     else:
         log("FAIL", "--syscall ebpf: failed")
@@ -813,6 +813,7 @@ examples:
         cc = os.path.join(os.path.expanduser(LLVM_SUFFIX), "clang")
     else:
         cc = f"clang{LLVM_SUFFIX}"
+    run(["make", "clean"], cwd=vock_dir, timeout=30)
     r = run(["make", f"CC={cc}", "EBPF=1", "-j4"],
             cwd=vock_dir, timeout=120)
     if r.returncode != 0:
