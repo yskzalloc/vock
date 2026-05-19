@@ -812,7 +812,7 @@ examples:
     r = run(["make", f"CC=clang{LLVM_SUFFIX}", "EBPF=1", "-j4"],
             cwd=vock_dir, timeout=120)
     if r.returncode != 0:
-        # Fallback without EBPF if libbpf not available
+        # Fallback without EBPF
         r = run(["make", f"CC=clang{LLVM_SUFFIX}", "-j4"],
                 cwd=vock_dir, timeout=120)
     if r.returncode != 0:
