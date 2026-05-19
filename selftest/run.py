@@ -114,6 +114,7 @@ def has_config(kconfig, key):
 
 
 def kernel_set_config(kernel_src, configs):
+    """Configure kernel. Uses scripts/config + olddefconfig."""
     script = os.path.join(kernel_src, "scripts/config")
     if not os.path.isfile(script):
         return False
@@ -124,12 +125,30 @@ def kernel_set_config(kernel_src, configs):
 
 
 def kernel_build(kernel_src):
+    """Build kernel using vng --build (handles 9p/VFS properly)."""
     print("  Building kernel...")
     llvm_flag = f"LLVM={LLVM_SUFFIX}"
     r = run(["vng", llvm_flag, "--build"], cwd=kernel_src, timeout=1800)
+    return r.returncode == 0
+
+
+def kernel_configure_and_build(kernel_src, configs):
+    """Configure + build in one step using vng --configitem + --build."""
+    if RUN_TARGET == "host":
+        # On host, don't build — assume kernel is already built
+        return True
+
+    print("  Configuring + building kernel...")
+    cmd = ["vng"]
+    for key, enable in configs.items():
+        if enable:
+            cmd += ["--configitem", f"{key}=y"]
+        else:
+            cmd += ["--configitem", f"{key}=n"]
+    cmd += ["--build", f"LLVM={LLVM_SUFFIX}"]
+    r = run(cmd, cwd=kernel_src, timeout=1800)
     if r.returncode != 0:
-        r = run(["make", llvm_flag, f"-j{os.cpu_count()}", "vmlinux"],
-                cwd=kernel_src, timeout=1800)
+        vlog(r)
     return r.returncode == 0
 
 
@@ -203,7 +222,6 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
     print("  TEST 1: coverage + syscall engines")
     print("=" * 60)
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True,
         "CONFIG_KCOV": True,
@@ -221,16 +239,10 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
     if arch_info["arch"] == "x86_64":
         configs["CONFIG_CPU_SUP_INTEL"] = True
 
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed")
         return False
-    log("PASS", "kernel configured (KCOV + BTF + CRYPTO)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed")
-        return False
-    log("PASS", "kernel built")
+    log("PASS", "kernel configured + built")
 
     vmlinux = os.path.join(kernel_src, "vmlinux")
 
@@ -318,7 +330,6 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         return True
     log("PASS", f"Intel PT supported ({arch_info['cpu']})")
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": False,
         "CONFIG_PERF_EVENTS": True, "CONFIG_CPU_SUP_INTEL": True,
@@ -328,14 +339,9 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured (KCOV=n, Intel PT=y)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built without KCOV")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     print("\n[Test: Intel PT + each --syscall]")
     vmlinux = os.path.join(kernel_src, "vmlinux")
@@ -383,21 +389,15 @@ def test_coresight(vock_dir, kernel_src, arch_info):
         return True
     log("PASS", f"CoreSight available ({arch_info['cpu']})")
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": False,
         "CONFIG_PERF_EVENTS": True, "CONFIG_CORESIGHT": True,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured (KCOV=n, CORESIGHT=y)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built without KCOV")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     print("\n[Test: CoreSight]")
     r = vng_run(kernel_src, [
@@ -428,20 +428,14 @@ def test_syscall_engines(vock_dir, kernel_src, arch_info):
     print("=" * 60)
 
     # Build kernel with KCOV+BTF for VM testing
-    print("\n[Configure]")
     configs = {"CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
                "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_BPF_SYSCALL": True,
                "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO": True,
                "CONFIG_DEBUG_INFO_DWARF5": True, "CONFIG_DEBUG_INFO_NONE": False,
                "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True, "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True}
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     print("\n[Test: --syscall ptrace]")
     r = vng_run(kernel_src, [
@@ -514,7 +508,6 @@ def test_filter(vock_dir, kernel_src, arch_info):
     print("  TEST 5: --filter (kcov + ebpf + veth create/destroy)")
     print("=" * 60)
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_BPF_SYSCALL": True,
@@ -524,14 +517,9 @@ def test_filter(vock_dir, kernel_src, arch_info):
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured (KCOV + BTF + NET)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     vmlinux = os.path.join(kernel_src, "vmlinux")
 
@@ -604,7 +592,6 @@ def test_btf(vock_dir, kernel_src, arch_info):
     print("  TEST 6: --btf (kcov + kallsyms resolution)")
     print("=" * 60)
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
@@ -614,14 +601,9 @@ def test_btf(vock_dir, kernel_src, arch_info):
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured (KCOV + BTF)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     print("\n[Test: --mode kcov --btf (crypto decrypt)]")
     r = vng_run(kernel_src, [
@@ -680,7 +662,6 @@ def test_crypto(vock_dir, kernel_src, arch_info):
     print("  TEST 7: crypto subsystem (kcov + btf + xts(aes) decrypt)")
     print("=" * 60)
 
-    print("\n[Configure]")
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
@@ -692,14 +673,9 @@ def test_crypto(vock_dir, kernel_src, arch_info):
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
-    if not kernel_set_config(kernel_src, configs):
-        log("FAIL", "cannot configure kernel"); return False
-    log("PASS", "kernel configured (KCOV + BTF + CRYPTO)")
-
-    print("\n[Build]")
-    if not kernel_build(kernel_src):
-        log("FAIL", "kernel build failed"); return False
-    log("PASS", "kernel built")
+    if not kernel_configure_and_build(kernel_src, configs):
+        log("FAIL", "kernel configure+build failed"); return False
+    log("PASS", "kernel configured + built")
 
     print("\n[Test: --mode kcov --btf (xts(aes) decrypt)]")
     r = vng_run(kernel_src, [
