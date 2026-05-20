@@ -53,7 +53,7 @@ jobs:
     - name: "Test 2.1: VM Guest HW + syscall syzlang engines"
       run: |
         source venv-virtme/bin/activate
-        sudo ./vock selftest 2 --on $VM_TARGET --kernel-src staging
+        ./vock selftest 2 --on $VM_TARGET --kernel-src staging
 
     - name: "Test 2.2: Host HW + syscall syzlang engines"
       run: |
