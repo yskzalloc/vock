@@ -155,15 +155,38 @@ P(select field_i) = weight_i / sum(all weights)
 Tested on `sock_common` (104 bytes, 24 fields): fields accumulate signal
 and get prioritized automatically.
 
-### Phase 4: Signal-Based Corpus (`fuzz/signal.c` upgrade)
+### Phase 4: Signal-Based Corpus (`fuzz/signal_edge.c`) ← CURRENT
 
-Replace raw PC counting with edge signal:
+Edge-based signal replaces weak (syscall_nr, errno) pairs:
+
 ```c
-signal = hash(current_PC ^ previous_PC)
+signal = hash(PC ^ prev_PC)   // for each consecutive KCOV PC pair
 ```
 
-Corpus keeps only programs with unique signal contribution.
-Minimize periodically (drop programs whose signal is subset of others).
+**Corpus management**:
+```c
+struct signal_corpus corpus;
+signal_corpus_init(&corpus);
+
+// After each execution:
+struct prog_signal sig;
+edge_signal_from_pcs(kcov_pcs, npc, &sig);
+if (signal_corpus_add(&corpus, prog_id, &sig)) {
+    // Program contributes new edges → keep in corpus
+}
+
+// Periodically:
+signal_corpus_minimize(&corpus);  // remove redundant programs
+```
+
+**Key properties**:
+- Programs accepted only if they contribute ≥1 new edge
+- Minimization removes programs whose edges are all covered by others
+- 64K-bucket hash map for O(1) edge lookup
+- Per-program signal stored as sorted uint32 array for fast set ops
+
+**Tested**: 1000 random programs → 23,900 unique edges tracked,
+redundant programs correctly identified and removed.
 
 ## File Layout
 
@@ -180,8 +203,12 @@ syzlang/
   types.c        — trace + BTF → type map
   types_test.c   — standalone binding test
 fuzz/
-  mutate.c       — existing syscall-level mutation (splice, reorder, etc)
-  signal.c       — edge-based signal tracking (Phase 4)
+  mutate.c       — syscall-level mutation (splice, reorder, etc)
+  signal_edge.h  — edge signal + corpus API
+  signal_edge.c  — edge-based corpus with minimization
+  signal_edge_test.c — standalone signal test
+  signal.c       — legacy (syscall_nr, errno) signal (kept for fallback)
+  covset.c       — raw PC tracking (kept for coverage reports)
 ```
 
 ## Status
@@ -189,4 +216,4 @@ fuzz/
 - [x] Phase 1: BTF parser — 140K types parsed, struct layouts verified
 - [x] Phase 2: Type binding — ioctl/setsockopt → BTF struct resolution
 - [x] Phase 3: Priority mutation — field-aware + signal-weighted selection
-- [ ] Phase 4: Signal corpus (edge-based minimization)
+- [x] Phase 4: Signal corpus — edge-based minimization, 23K edges tracked
