@@ -2,7 +2,7 @@ name: vock CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, btf-aware]
   pull_request:
     branches: [main]
 

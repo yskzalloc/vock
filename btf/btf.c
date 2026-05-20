@@ -95,14 +95,46 @@ struct vock_btf *vock_btf_open(const char *path)
 	if (fread(raw, 1, fsize, f) != (size_t)fsize) { free(raw); fclose(f); return NULL; }
 	fclose(f);
 
-	struct btf_header *hdr = (struct btf_header *)raw;
-	if (hdr->magic != BTF_MAGIC) { free(raw); return NULL; }
+	/* If ELF file, extract .BTF section */
+	uint8_t *btf_data = raw;
+	size_t btf_size = fsize;
+	if (fsize > 64 && memcmp(raw, "\x7f" "ELF", 4) == 0) {
+		typedef struct { uint8_t e_ident[16]; uint16_t e_type; uint16_t e_machine;
+			uint32_t e_version; uint64_t e_entry; uint64_t e_phoff;
+			uint64_t e_shoff; uint32_t e_flags; uint16_t e_ehsize;
+			uint16_t e_phentsize; uint16_t e_phnum; uint16_t e_shentsize;
+			uint16_t e_shnum; uint16_t e_shstrndx; } Elf64_Ehdr_local;
+		typedef struct { uint32_t sh_name; uint32_t sh_type; uint64_t sh_flags;
+			uint64_t sh_addr; uint64_t sh_offset; uint64_t sh_size;
+			uint32_t sh_link; uint32_t sh_info; uint64_t sh_addralign;
+			uint64_t sh_entsize; } Elf64_Shdr_local;
+
+		Elf64_Ehdr_local *ehdr = (Elf64_Ehdr_local *)raw;
+		if ((uint64_t)ehdr->e_shoff + ehdr->e_shnum * sizeof(Elf64_Shdr_local) > (uint64_t)fsize) {
+			free(raw); return NULL;
+		}
+		Elf64_Shdr_local *shdr = (Elf64_Shdr_local *)((uint8_t *)raw + ehdr->e_shoff);
+		char *shstrtab = (char *)((uint8_t *)raw + shdr[ehdr->e_shstrndx].sh_offset);
+		int found = 0;
+		for (int i = 0; i < ehdr->e_shnum; i++) {
+			if (strcmp(&shstrtab[shdr[i].sh_name], ".BTF") == 0) {
+				btf_data = (uint8_t *)raw + shdr[i].sh_offset;
+				btf_size = shdr[i].sh_size;
+				found = 1;
+				break;
+			}
+		}
+		if (!found) { free(raw); return NULL; }
+	}
+
+	struct btf_header *hdr = (struct btf_header *)btf_data;
+	if (btf_size < sizeof(struct btf_header) || hdr->magic != BTF_MAGIC) { free(raw); return NULL; }
 
 	struct vock_btf *btf = calloc(1, sizeof(*btf));
 	btf->raw = raw;
 	btf->raw_len = fsize;
 
-	uint8_t *base = (uint8_t *)raw + hdr->hdr_len;
+	uint8_t *base = btf_data + hdr->hdr_len;
 	uint8_t *type_sec = base + hdr->type_off;
 	uint32_t type_len = hdr->type_len;
 	btf->str_section = (char *)(base + hdr->str_off);
