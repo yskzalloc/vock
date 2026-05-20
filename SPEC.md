@@ -93,14 +93,34 @@ Kinds we care about:
 - `BTF_KIND_TYPEDEF` (8) — alias
 - `BTF_KIND_CONST` (10), `BTF_KIND_VOLATILE` (9) — qualifiers
 
-### Phase 2: Type Binding (`syzlang/types.c`)
+### Phase 2: Type Binding (`syzlang/types.c`) ← CURRENT
 
-Given `trace.syz` + BTF, auto-resolve:
-- `ioctl(fd, CMD, arg)` → find CMD in BTF enums → resolve arg struct
-- `setsockopt(fd, level, name, val, len)` → match to kernel struct
-- `write(fd, buf, len)` on special fds → protocol-specific structs
+Given `trace.syz` + BTF, auto-resolve syscall args to kernel structs:
 
-Output: array of `{syscall_nr, cmd, btf_type_id, arg_index}` bindings.
+```c
+int vock_types_resolve(struct vock_btf *btf, const char *trace_path,
+                       struct vock_type_map *out);
+```
+
+Resolution strategies (in priority order):
+1. **ioctl cmd → BTF enum lookup** — search all BTF enums for the cmd value
+2. **ioctl cmd → _IOC_SIZE** — extract encoded struct size, find matching BTF struct
+3. **setsockopt optlen** — match optval size against BTF structs
+4. **sendmsg/write** — (future) protocol-specific struct matching
+
+Example output:
+```
+line  60: ioctl(cmd=0x802c542a) arg[2] → struct acpi_genl_event (44 bytes)
+           struct acpi_genl_event { /* 44 bytes */
+             +  0.0  device_class  array[20]
+             + 20.0  bus_id        array[15]
+             + 36.0  type          u32
+             + 40.0  data          u32
+           }
+```
+
+The binding tells the mutator: "arg[2] of this ioctl points to a 44-byte struct
+with these fields at these offsets with these types."
 
 ### Phase 3: Priority Mutation (`fuzz/mutate.c` upgrade)
 
@@ -143,6 +163,6 @@ fuzz/
 ## Status
 
 - [x] Phase 1: BTF parser — 140K types parsed, struct layouts verified
-- [ ] Phase 2: Type binding (trace + BTF → syscall arg types)
+- [x] Phase 2: Type binding — ioctl/setsockopt → BTF struct resolution
 - [ ] Phase 3: Priority mutation (field-aware + signal-weighted)
 - [ ] Phase 4: Signal corpus (edge-based minimization)
