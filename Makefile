@@ -27,7 +27,7 @@ else
 endif
 
 .PHONY: all
-all: $(TARGET_EXE) $(TARGET_LIB) sud-libs
+all: $(TARGET_EXE) $(TARGET_LIB) sud-libs btf-test
 
 $(TARGET_EXE): $(EXE_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -42,8 +42,12 @@ $(TARGET_LIB): $(LIB_SOURCE)
 sud-libs:
 	$(MAKE) -C syscall/sud CC=$(CC) || echo "[warn] SUD build failed (--syscall sud unavailable)"
 
+.PHONY: btf-test
+btf-test: btf/btf_test
+btf/btf_test: btf/btf_test.c btf/btf.c btf/btf.h
+	$(CC) $(CFLAGS) -o $@ btf/btf_test.c btf/btf.c
 
 .PHONY: clean
 clean:
-	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS) syscall/x86_64/*.o syscall/aarch64/*.o
+	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS) syscall/x86_64/*.o syscall/aarch64/*.o btf/btf_test
 	$(MAKE) -C syscall/sud clean 2>/dev/null || true
