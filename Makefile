@@ -47,6 +47,11 @@ btf-test: btf/btf_test
 btf/btf_test: btf/btf_test.c btf/btf.c btf/btf.h
 	$(CC) $(CFLAGS) -o $@ btf/btf_test.c btf/btf.c
 
+.PHONY: mutate-test
+mutate-test: btf/mutate_test
+btf/mutate_test: btf/mutate_test.c btf/mutate.c btf/mutate.h btf/btf.c btf/btf.h
+	$(CC) $(CFLAGS) -o $@ btf/mutate_test.c btf/mutate.c btf/btf.c
+
 .PHONY: types-test
 types-test: syzlang/types_test
 syzlang/types_test: syzlang/types_test.c syzlang/types.c syzlang/types.h btf/btf.c btf/btf.h
@@ -54,5 +59,5 @@ syzlang/types_test: syzlang/types_test.c syzlang/types.c syzlang/types.h btf/btf
 
 .PHONY: clean
 clean:
-	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS) syscall/x86_64/*.o syscall/aarch64/*.o btf/btf_test
+	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS) syscall/x86_64/*.o syscall/aarch64/*.o btf/btf_test btf/mutate_test syzlang/types_test
 	$(MAKE) -C syscall/sud clean 2>/dev/null || true

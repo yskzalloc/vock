@@ -122,18 +122,38 @@ line  60: ioctl(cmd=0x802c542a) arg[2] → struct acpi_genl_event (44 bytes)
 The binding tells the mutator: "arg[2] of this ioctl points to a 44-byte struct
 with these fields at these offsets with these types."
 
-### Phase 3: Priority Mutation (`fuzz/mutate.c` upgrade)
+### Phase 3: Priority Mutation (`btf/mutate.c`) ← CURRENT
 
-Replace random byte-flip with:
+Type-aware field mutation with signal-weighted selection:
 
-1. **Field selection** — pick struct field weighted by past signal contribution
-2. **Type-aware values**:
-   - `BTF_KIND_INT`: 0, 1, -1, MAX, MIN, powers of 2, bit-flips
-   - `BTF_KIND_PTR`: NULL, 0xdead, page-aligned, kernel-range
-   - `BTF_KIND_ENUM`: pick from known valid values
-   - `BTF_KIND_STRUCT` (nested): recurse
-3. **Signal feedback** — track which field mutations produce new edges,
-   increase weight for productive fields
+```c
+struct vock_btf_mutator m;
+vock_btf_mutator_init(&m, btf, struct_type);
+
+// Fuzz loop:
+int field = vock_btf_mutate(&m, buf, buf_size);  // mutate one field
+// ... execute syscall, check coverage ...
+if (new_signal) vock_btf_mutator_reward(&m, field);  // feedback
+```
+
+**Field selection**: weighted random — fields that produced new signal in past
+iterations get higher probability of being selected again.
+
+**Type-specific strategies**:
+- `BTF_KIND_INT`: boundary values (0, MAX, -1), bit-flip, delta(±1..35), random
+- `BTF_KIND_PTR`: NULL, 0xdead, page-aligned, kernel direct-map range
+- `BTF_KIND_ENUM`: pick valid value (70%), adjacent ±1 (20%), random (10%)
+- `BTF_KIND_ARRAY`: mutate one element, zero-fill, 0xff-fill, random-fill
+- `BTF_KIND_STRUCT` (nested): random byte-flip within sub-struct
+
+**Signal feedback loop**:
+```
+weight[field] = (hits + 1) / (tries + 1)
+P(select field_i) = weight_i / sum(all weights)
+```
+
+Tested on `sock_common` (104 bytes, 24 fields): fields accumulate signal
+and get prioritized automatically.
 
 ### Phase 4: Signal-Based Corpus (`fuzz/signal.c` upgrade)
 
@@ -149,20 +169,24 @@ Minimize periodically (drop programs whose signal is subset of others).
 
 ```
 btf/
-  btf.h          — public API
+  btf.h          — BTF parser API
   btf.c          — parser implementation
-  btf_test.c     — standalone test binary
+  btf_test.c     — standalone parser test
+  mutate.h       — type-aware mutation API
+  mutate.c       — field mutation + signal weights
+  mutate_test.c  — standalone mutation test
 syzlang/
   types.h        — type binding API
   types.c        — trace + BTF → type map
+  types_test.c   — standalone binding test
 fuzz/
-  mutate.c       — upgraded with type-aware mutation
-  signal.c       — edge-based signal tracking
+  mutate.c       — existing syscall-level mutation (splice, reorder, etc)
+  signal.c       — edge-based signal tracking (Phase 4)
 ```
 
 ## Status
 
 - [x] Phase 1: BTF parser — 140K types parsed, struct layouts verified
 - [x] Phase 2: Type binding — ioctl/setsockopt → BTF struct resolution
-- [ ] Phase 3: Priority mutation (field-aware + signal-weighted)
+- [x] Phase 3: Priority mutation — field-aware + signal-weighted selection
 - [ ] Phase 4: Signal corpus (edge-based minimization)
