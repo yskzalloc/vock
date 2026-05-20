@@ -15,15 +15,10 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y clang flex bison bc dwarves pahole libelf-dev \
-                                libssl-dev kmod libncurses-dev git python3-pip
-                                python3-venv qemu-system libbpf-dev \
-                                kcapi-tools # For kernel crypto subsystem coverage test
-
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-        source ~/.bashrc
-        cargo install bindgen-cli
-        rustup component add rust-src
+        sudo apt-get install clang flex bison bc dwarves pahole libelf-dev \
+                             libssl-dev kmod libncurses-dev git \
+                             python3-pip python3-venv qemu-system curl \
+                             kcapi-tools # For kernel crypto subsystem coverage test
 
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
@@ -40,6 +35,12 @@ jobs:
         git clone -b staging-testing --depth 1 \
           https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
 
+    - name: Install rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        cargo install bindgen-cli
+        rustup component add rust-src
+
     - name: Build vock
       run: |
         make CC=clang EBPF=1
@@ -49,10 +50,14 @@ jobs:
         source venv-virtme/bin/activate
         ./vock selftest 1 --on $VM_TARGET --kernel-src staging
 
-    - name: "Test 2: HW + syscall syzlang engines"
+    - name: "Test 2.1: VM Guest HW + syscall syzlang engines"
       run: |
         source venv-virtme/bin/activate
-        ./vock selftest 2 --on $VM_TARGET --kernel-src staging
+        sudo ./vock selftest 2 --on $VM_TARGET --kernel-src staging
+
+    - name: "Test 2.2: Host HW + syscall syzlang engines"
+      run: |
+        sudo ./vock selftest 2 --on host --kernel-src staging
 
         # cd staging
         # make LLVM=1 rustavailable
