@@ -97,7 +97,7 @@ Coverage + syscall trace in one shot:
 |---------|------|-------|-------------|
 | ptrace | `--syscall ptrace` | Moderate | Any kernel |
 | SUD | `--syscall sud` | Fast | Kernel ≥ 5.11, x86_64, `mmap_min_addr=0` |
-| eBPF | `--syscall ebpf` | Fastest | `make EBPF=1` + libbpf-dev |
+| eBPF | `--syscall ebpf` | Fastest | Kernel with BTF (`/sys/kernel/btf/vmlinux`) |
 
 SUD setup:
 ```bash
@@ -109,6 +109,7 @@ echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 | Feature | Intel x86_64 | ARM64 | AMD x86_64 |
 |---------|:---:|:---:|:---:|
 | Intel PT coverage | ✓ | — | — |
+| AMD LBR coverage | — | — | ✓ |
 | CoreSight coverage | — | ✓ | — |
 | KCOV coverage | ✓ | ✓ | ✓ |
 | Syscall trace | ✓ | ✓ | ✓ |
@@ -137,9 +138,10 @@ syz-trace2syz -file trace.syz
 ## Selftest
 
 ```bash
-./vock selftest              # quick host test
-./vock selftest --on vng-kvm # full VM test
-./vock selftest --help       # all options
+./vock selftest 1 --on vng-kvm       # coverage + syscall (VM)
+sudo ./vock selftest 2 --on host     # Intel PT (bare metal)
+./vock selftest 2 --on vng-kvm       # AMD LBR (works in VM)
+./vock selftest --help                # all options
 ```
 
 See [SELFTEST.md](SELFTEST.md) for kernel configuration and VM testing details.
@@ -159,35 +161,9 @@ See [SELFTEST.md](SELFTEST.md) for kernel configuration and VM testing details.
 ## Build Options
 
 ```bash
-make                    # default (no eBPF)
-make EBPF=1             # with eBPF backend (needs libbpf ≥ 0.7)
+make                    # default (includes eBPF backend)
 make CC=clang           # use clang
-```
-
-### eBPF with old libbpf (Ubuntu 22.04 / libbpf < 0.7)
-
-If `make EBPF=1` fails with undefined references, build libbpf locally:
-
-```bash
-# Install libbpf from source (no sudo)
-git clone --depth 1 https://github.com/libbpf/libbpf.git
-cd libbpf/src && BUILD_STATIC_ONLY=y DESTDIR=~/libbpf-install make install
-
-# Generate BPF skeleton
-cd vock/syscall/ebpf
-bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
-clang -O2 -g -target bpf -I ~/libbpf-install/usr/include -c trace.bpf.c -o trace.bpf.o
-bpftool gen skeleton trace.bpf.o > trace.skel.h
-
-# Build vock
-cd vock
-make CC=clang EBPF=1 \
-  "CFLAGS+=-I$HOME/libbpf-install/usr/include" \
-  "LDFLAGS+=-L$HOME/libbpf-install/usr/lib64"
-
-# Run (set library path)
-export LD_LIBRARY_PATH=~/libbpf-install/usr/lib64
-./vock --syscall ebpf /bin/ls /tmp
+make CC=gcc             # use gcc
 ```
 
 ## License

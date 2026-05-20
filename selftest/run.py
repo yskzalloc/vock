@@ -336,6 +336,9 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
     print("  TEST 2: Hardware Trace (Intel PT / AMD LBR)")
     print("=" * 60)
 
+    if RUN_TARGET != "host" and arch_info.get("has_intel_pt") and not arch_info.get("has_amd_lbr"):
+        log("SKIP", "Intel PT unavailable in KVM guests (use --on host)")
+        return True
     if arch_info["arch"] != "x86_64":
         log("SKIP", "HW trace: not x86_64")
         return True
@@ -361,13 +364,16 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
     print(f"\n[Test: {hw_type} + each --syscall]")
     vmlinux = os.path.join(kernel_src, "vmlinux")
 
+    # Intel PT requires perf_event_paranoid <= 1 or root
+    perf_pre = "echo -1 | sudo -n tee /proc/sys/kernel/perf_event_paranoid > /dev/null 2>&1 || true; "
+
     for backend in ["ptrace", "sud", "ebpf"]:
         sud_pre = SUD_SETUP if backend == "sud" else ""
         print(f"\n[Test: --mode hw --syzlang --syscall {backend} --vmlinux]")
         r = vng_run(kernel_src, [
             "bash", "-c",
             f"rm -f kerncov.log trace.log trace.syz && "
-            f"{sud_pre}{crypto_prepare()} && "
+            f"{perf_pre}{sud_pre}{crypto_prepare()} && "
             f"{vock_dir}/vock --mode hw --syzlang --syscall {backend} "
             f"--vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
@@ -379,6 +385,8 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         out = r.stdout.decode() if r.stdout else ""
         if "ebpf backend not built" in out:
             log("SKIP", f"hw+{backend}: ebpf not built")
+        elif "requires privileges" in out or "no hardware trace PMU" in out:
+            log("SKIP", f"hw+{backend}: needs perf_event_paranoid=-1 or Intel PT unavailable")
         elif "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
             if int(pcs) > 0:

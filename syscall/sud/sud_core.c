@@ -1,5 +1,6 @@
 #include "sud_core.h"
 
+#include "compat_align.h"
 #include "lazypoline.h"
 #include "zpoline.h"
 #include "gsreldata.h"

@@ -15,10 +15,10 @@ LAZYPOLINE_OBJS = sud_core.o zpoline.o lazypoline.o syscall_names.o \
                   restore_selector_trampoline.o setup_new_thread.o
 
 liblazypoline.so: $(LAZYPOLINE_OBJS)
-	$(CC) -shared -O3 -flto -o $@ $^ -lpthread
+	$(CC) -shared -O3 -o $@ $^ -lpthread
 
 libbootstrap.so: bootstrap.o
-	$(CC) -shared -O3 -flto -o $@ $^ -ldl
+	$(CC) -shared -O3 -o $@ $^ -ldl
 
 # Object rules
 sud_core.o: sud_core.c

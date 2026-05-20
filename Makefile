@@ -42,3 +42,8 @@ $(TARGET_LIB): $(LIB_SOURCE)
 sud-libs:
 	$(MAKE) -C syscall/sud CC=$(CC) || echo "[warn] SUD build failed (--syscall sud unavailable)"
 
+
+.PHONY: clean
+clean:
+	rm -f $(TARGET_EXE) $(TARGET_LIB) $(EXE_OBJS) syscall/x86_64/*.o syscall/aarch64/*.o
+	$(MAKE) -C syscall/sud clean 2>/dev/null || true

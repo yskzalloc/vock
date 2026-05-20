@@ -5,11 +5,14 @@ Automated test framework. Configures kernels, builds, boots VMs, and verifies ea
 ## Quick Start
 
 ```bash
-# VM tests (need kernel source)
+# VM tests (need kernel source + vng)
 vock selftest 1 --on vng-kvm --kernel-src ~/net
 
-# Bare metal tests (need Intel PT / AMD LBR hardware)
-vock selftest 2 --kernel-src ~/net
+# HW trace: Intel PT (bare metal only, needs root)
+sudo vock selftest 2 --on host --kernel-src ~/net
+
+# HW trace: AMD LBR (works in VM too)
+vock selftest 2 --on vng-kvm --kernel-src ~/net
 
 # CI (no KVM available)
 vock selftest 1 --on vng-tcg --kernel-src ~/net
@@ -18,14 +21,14 @@ vock selftest 1 --on vng-tcg --kernel-src ~/net
 ## Options
 
 ```
-vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] [1-6]
+vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] [1-6]
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--on` | `vng-kvm` | VM acceleration for tests that need vng |
+| `--on` | `vng-kvm` | Execution target |
 | `--kernel-src` | `$HOME/stable` | Kernel source tree |
-| `--llvm` | auto-detect | LLVM suffix (e.g. `-21`). Also reads `LLVM` env |
+| `--llvm` | auto-detect | LLVM suffix (e.g. `-21`) or path. Also reads `LLVM` env |
 | `1`-`6` | all | Run specific test only |
 
 ## Test Numbers
@@ -33,8 +36,8 @@ vock selftest [-h] [--on {vng-kvm,vng-tcg}] [--kernel-src PATH] [--llvm SUFFIX] 
 | # | Name | Runs on | What |
 |---|------|---------|------|
 | 1 | Coverage + Syscall + Syzlang | vng | KCOV+vmlinux, KCOV+BTF × each --syscall + --syzlang |
-| 2 | Intel PT / AMD LBR | **host** | HW + vmlinux × each --syscall (ptrace/sud/ebpf) |
-| 3 | CoreSight | **host** | aarch64 HW trace, KCOV disabled |
+| 2 | Intel PT / AMD LBR | **host** (Intel) or vng (AMD) | HW + vmlinux × each --syscall + --syzlang |
+| 3 | CoreSight | **host** (bare metal) | aarch64 HW trace, KCOV disabled |
 | 4 | Filter + netdev | vng | `--filter net` + veth create/configure/destroy |
 | 5 | BTF | vng | `--btf --kernel-src` + HTML report |
 | 6 | Crypto | vng | xts(aes) decrypt coverage + verification |
@@ -61,14 +64,33 @@ Builds one kernel, runs 2 groups:
 
 Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0.
 
-## Test 2: Intel PT / AMD LBR (host, bare metal)
+## Test 2: Intel PT / AMD LBR (bare metal or VM)
 
-Requires Intel PT or AMD LBR hardware. Skipped if unavailable.
+Requirements vary by hardware:
+- **Intel PT**: requires `--on host` (not available inside KVM guests) + root
+- **AMD LBR**: works in both `--on host` and `--on vng-kvm`
+
+```bash
+# Intel PT (bare metal only):
+sudo ./vock selftest 2 --on host --kernel-src ~/net
+
+# AMD LBR (works in VM too):
+./vock selftest 2 --on vng-kvm --kernel-src ~/net
+
+# Or set paranoid first (Intel):
+echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+./vock selftest 2 --on host --kernel-src ~/net
+```
+
+Skips automatically if:
+- Intel PT + `--on vng-kvm` (Intel PT unavailable in KVM guests)
+- No Intel PT / AMD LBR hardware detected
+- Insufficient privileges
 
 ```
---mode hw --syscall ptrace --vmlinux  → kerncov.log + trace.log
---mode hw --syscall sud --vmlinux     → kerncov.log + trace.log
---mode hw --syscall ebpf --vmlinux    → kerncov.log + trace.log
+--mode hw --syzlang --syscall ptrace --vmlinux  → kerncov.log + trace.log + trace.syz
+--mode hw --syzlang --syscall sud --vmlinux     → kerncov.log + trace.log + trace.syz
+--mode hw --syzlang --syscall ebpf --vmlinux    → kerncov.log + trace.log + trace.syz
 ```
 
 ## Target Programs
@@ -122,8 +144,11 @@ vng LLVM=-21 --build
 Priority: `--llvm` flag > `LLVM` env > auto-detect.
 
 ```bash
+# Suffix style (system-installed)
 vock selftest 1 --llvm -21 --kernel-src ~/net
-LLVM=-21 vock selftest 1 --kernel-src ~/net
+
+# Path style (custom build)
+sudo vock selftest 2 --llvm /home/yunseong/llvm-project/build/bin/ --on host --kernel-src ~/net
 ```
 
 ## GitHub CI

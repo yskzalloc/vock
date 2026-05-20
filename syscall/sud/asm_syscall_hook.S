@@ -16,7 +16,7 @@
     popq %rax
     popq %rdx
 #endif
-.endmacro
+.endm
 
 .macro xrstor_vector_regs_from_gsrel
 #if SAVE_VECTOR_REGS
@@ -33,7 +33,7 @@
     popq %rax
     popq %rdx
 #endif
-.endmacro
+.endm
 
 .macro setup_c_stack
     pushq %rbp
@@ -55,7 +55,7 @@
     pushq %rdx
     pushq %rcx
     pushq %r10
-.endmacro
+.endm
 
 .macro teardown_c_stack
     popq %r10
@@ -69,14 +69,14 @@
 
     movq %rbp, %rsp
     popq %rbp
-.endmacro
+.endm
 
 .macro exit_interposer
     /* block SUD */
     movb $1, %gs:SUD_SELECTOR_OFFSET
 
     /* rip_after_syscall should be at top of stack here */
-.endmacro
+.endm
 
 .globl asm_syscall_hook
 asm_syscall_hook:

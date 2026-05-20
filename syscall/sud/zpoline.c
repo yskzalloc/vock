@@ -1,5 +1,6 @@
 #include "zpoline.h"
 
+#include "compat_align.h"
 #include "lazypoline.h"
 #include "sud_core.h"
 #include "rigtorp_spinlock.h"

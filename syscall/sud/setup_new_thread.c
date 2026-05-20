@@ -1,7 +1,9 @@
 #include "gsreldata.h"
 #include "nolibc_util.h"
 #include "signal_handlers.h"
+#include "compat_align.h"
 
+#include <stdint.h>
 #include <linux/sched.h>
 #include <linux/prctl.h>
 #include <linux/unistd.h>
