@@ -27,6 +27,7 @@ def log(status, msg):
 def run(cmd, **kwargs):
     kwargs.setdefault("capture_output", True)
     kwargs.setdefault("timeout", 300)
+    kwargs["shell"] = False  # Explicitly prevent shell injection
     return subprocess.run(cmd, **kwargs)
 
 
