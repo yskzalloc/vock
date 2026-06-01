@@ -36,7 +36,7 @@ $(TARGET_EXE): $(EXE_OBJS)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(TARGET_LIB): $(LIB_SOURCE)
-	$(CC) $(CFLAGS) -shared -fPIC -o $@ $<
+	$(CC) $(CFLAGS) -shared -fPIC -o $@ $< -ldl -lpthread
 
 .PHONY: sud-libs
 sud-libs:
