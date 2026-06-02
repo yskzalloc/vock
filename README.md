@@ -226,9 +226,10 @@ See [SELFTEST.md](SELFTEST.md) for details.
 ## Build
 
 ```bash
-make CC=clang           # recommended
-make CC=gcc             # alternative
+make CC=clang
 ```
+
+Note: This project is not tested with gcc. There is no plan to support gcc yet.
 
 ## License
 
