@@ -1,173 +1,205 @@
 # vock
 
-Kernel code coverage + syscall tracer + coverage-guided fuzzer — in one tool.
+![vock](https://github.com/user-attachments/assets/69531851-8776-42ed-82f9-dac937f089de)
 
-Map any userspace program to the exact kernel code it exercises, then fuzz those paths.
+Map any userspace program to the exact kernel code it exercises.
 
 ```bash
-make && ./vock /bin/ip addr show
-```
-
-No dependencies beyond a C compiler. Just `make` and run.
-
-## What It Does
-
-```
-┌─────────────┐     ┌──────────────┐     ┌──────────────┐
-│  Your App   │────▶│  vock trace  │────▶│  Kernel PCs  │
-│  /bin/ip    │     │  (coverage)  │     │  kerncov.log │
-└─────────────┘     └──────────────┘     └──────────────┘
-                           │
-                           ▼
-                    ┌──────────────┐     ┌──────────────┐
-                    │  vock fuzz   │────▶│  New paths   │
-                    │  (mutate)    │     │  fuzz.log    │
-                    └──────────────┘     └──────────────┘
+sudo ./vock --vmlinux vmlinux /bin/ip addr show
+# → kerncov.log + coverage.html
 ```
 
 ## Install
 
+Debian/Ubuntu:
+```bash
+sudo apt install clang libelf-dev linux-headers-$(uname -r)
+```
+
+Build:
 ```bash
 git clone https://github.com/yskzalloc/vock && cd vock
-make
+make CC=clang
 ```
 
 ## Usage
 
-### 1. Kernel Coverage
+### 1. Hardware Mode (Intel PT / AMD LBR)
 
-See which kernel code your program touches:
+Works on **any kernel** — no CONFIG_KCOV needed:
 
 ```bash
-# Intel PT (works on any kernel, needs Intel CPU)
-./vock /bin/ip addr show
+# Full branch coverage (needs vmlinux for TNT decoding)
+sudo ./vock --vmlinux /boot/vmlinux-$(uname -r) /bin/ip addr show
 # → kerncov.log + coverage.html
 
-# KCOV (needs CONFIG_KCOV)
-./vock --mode kcov /bin/ip addr show
-# → kerncov.log + coverage.html
+# Function-entry only (no vmlinux)
+sudo ./vock /bin/ip addr show
+# → kerncov.log
 ```
 
-### 2. Syscall Tracing
+If not running as root:
+```bash
+echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+./vock --vmlinux vmlinux /bin/ip addr show
+```
 
-Record all syscalls in strace format:
+### 2. KCOV Mode
+
+Per-task kernel coverage including remote (softirqs, workqueues):
 
 ```bash
-./vock --syscall /bin/ls /tmp
-# → trace.log (human-readable strace format)
-
-./vock --syzlang /bin/ls /tmp
-# → trace.log + trace.syz (for syzkaller's syz-trace2syz)
+sudo ./vock --mode kcov /bin/ip addr show
+# → kerncov.log (local + remote) + coverage.html
 ```
 
-### 3. Fuzzing
+Tracks coverage across `fork()` and `pthread_create()` — each child gets its own KCOV instance (`local-<TID>.log`).
 
-Mutate the program's syscalls to explore nearby kernel paths:
+### 3. Syscall Tracking
 
 ```bash
-./vock fuzz /bin/ip addr show
-# Runs until Ctrl+C
-# → trace.syz (baseline) + fuzz_N.log (rankings)
+sudo ./vock --syscall /bin/ls /tmp
+# → kerncov.log + trace.log
 
-./vock fuzz -repeat=100 /bin/ip addr show
-# 100 iterations then stop
-
-./vock fuzz -procs=8 /bin/ip addr show
-# 8 parallel workers, until Ctrl+C
+sudo ./vock --syzlang /bin/ip addr show
+# → kerncov.log + trace.log + trace.syz (for syz-trace2syz)
 ```
 
-Each iteration: mutate baseline syscalls → fork child → child executes
-mutated syscalls directly via `syscall()` → parent traces with Intel PT →
-rank by coverage novelty. No compilation in the loop.
-
-See [FUZZ.md](FUZZ.md) for algorithm details.
-
-### 4. Combined
-
-Coverage + syscall trace in one shot:
+### 4. Fuzzing (experimental)
 
 ```bash
-./vock --syscall /bin/ip addr show
-# → kerncov.log + trace.log + coverage.html
+sudo ./vock fuzz /bin/ip addr show
+sudo ./vock fuzz -repeat=100 -procs=8 /bin/ip addr show
 ```
+
+See [FUZZ.md](FUZZ.md) for details.
+
+## Kernel Configuration
+
+Each feature requires specific kernel configs:
+
+### HW Mode (Intel PT / AMD LBR / CoreSight)
+
+Works on stock distro kernels — only needs:
+```
+CONFIG_PERF_EVENTS=y
+```
+
+### KCOV Mode
+
+```
+CONFIG_KCOV=y
+CONFIG_KCOV_INSTRUMENT_ALL=y
+```
+
+### eBPF Syscall Backend (`--syscall ebpf`)
+
+```
+CONFIG_BPF_SYSCALL=y
+CONFIG_DEBUG_INFO_BTF=y
+```
+
+### Coverage Report with Source Annotation (`--vmlinux`, `--kernel-src`)
+
+```
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF5=y
+```
+
+### BTF Function Resolution (`--btf`)
+
+```
+CONFIG_DEBUG_INFO_BTF=y
+CONFIG_IKCONFIG=y
+CONFIG_IKCONFIG_PROC=y
+```
+
+### Crypto Subsystem Coverage (selftest 6)
+
+```
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_USER=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
+```
+
+## Coverage Modes
+
+| Mode | Flag | Coverage Level | Kernel Requirement |
+|------|------|---------------|-------------------|
+| Intel PT | `--mode hw` (default) | Branch (with vmlinux) or function-entry | `CONFIG_PERF_EVENTS=y` |
+| AMD LBR | `--mode hw` (auto) | Function-entry, works in VMs | `CONFIG_PERF_EVENTS=y` |
+| CoreSight | `--mode hw` (auto) | Function-entry | `CONFIG_PERF_EVENTS=y`, `CONFIG_CORESIGHT=y` |
+| KCOV | `--mode kcov` | Branch (per-task + remote) | `CONFIG_KCOV=y`, `CONFIG_KCOV_INSTRUMENT_ALL=y` |
 
 ## Syscall Backends
 
-| Backend | Flag | Speed | Requirements |
-|---------|------|-------|-------------|
-| ptrace | `--syscall ptrace` | Moderate | Any kernel |
-| SUD | `--syscall sud` | Fast | Kernel ≥ 5.11, x86_64, `mmap_min_addr=0` |
-| eBPF | `--syscall ebpf` | Fastest | Kernel with BTF (`/sys/kernel/btf/vmlinux`) |
+| Backend | Flag | Requirement |
+|---------|------|-------------|
+| ptrace | `--syscall ptrace` (default) | Any kernel |
+| SUD | `--syscall sud` | Kernel ≥ 5.11, x86_64, `mmap_min_addr=0` |
+| eBPF | `--syscall ebpf` | `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y` |
 
 SUD setup:
 ```bash
 echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 ```
 
-## Architecture
+## Architecture Support
 
 | Feature | Intel x86_64 | ARM64 | AMD x86_64 |
 |---------|:---:|:---:|:---:|
-| Intel PT coverage | ✓ | — | — |
-| AMD LBR coverage | — | — | ✓ |
-| CoreSight coverage | — | ✓ | — |
-| KCOV coverage | ✓ | ✓ | ✓ |
-| Syscall trace | ✓ | ✓ | ✓ |
-| Fuzzing | ✓ | ✓ | ✓ |
+| Intel PT (full branch) | ✓ | — | — |
+| AMD LBR (function-entry) | — | — | ✓ |
+| CoreSight | — | ✓ | — |
+| KCOV | ✓ | ✓ | ✓ |
+| Syscall tracking | ✓ | ✓ | ✓ |
 
-## Workflow: From Trace to Fuzzer Corpus
+## Workflow: Coverage to Syzkaller
 
 ```bash
 # 1. What kernel code does the target reach?
-./vock /bin/ip addr show
+sudo ./vock --vmlinux vmlinux /bin/ip addr show
 # → kerncov.log (5000+ kernel PCs)
 
 # 2. Get syscall trace for syzkaller
-./vock --syzlang /bin/ip addr show
+sudo ./vock --syzlang /bin/ip addr show
 # → trace.syz
 
 # 3. Feed to syzkaller
 syz-trace2syz -file trace.syz
 # → syzkaller corpus
-
-# 4. Or fuzz directly with vock
-./vock fuzz /bin/ip addr show
-# → finds new kernel paths near the original execution
 ```
 
 ## Selftest
 
 ```bash
-./vock selftest 1 --on vng-kvm       # coverage + syscall (VM)
+./vock selftest 1 --on vng-kvm       # KCOV + syscall engines (VM)
+./vock selftest 2 --on vng-kvm       # AMD LBR (VM)
 sudo ./vock selftest 2 --on host     # Intel PT (bare metal)
-./vock selftest 2 --on vng-kvm       # AMD LBR (works in VM)
 ./vock selftest --help                # all options
 ```
 
-See [SELFTEST.md](SELFTEST.md) for kernel configuration and VM testing details.
+See [SELFTEST.md](SELFTEST.md) for details.
 
-## Files
+## Output Files
 
-| Output | Description |
-|--------|-------------|
-| `kerncov.log` | Merged kernel coverage (local + remote) |
-| `local.log` | KCOV local coverage (direct syscall paths) |
-| `remote.log` | KCOV remote coverage (softirqs, workqueues) |
+| File | Description |
+|------|-------------|
+| `kerncov.log` | Merged kernel coverage (all per-TID logs combined) |
+| `local-<TID>.log` | Per-task KCOV coverage (direct syscall paths) |
+| `remote-<TID>.log` | Per-task remote coverage (softirqs, workqueues) |
 | `coverage.html` | Source-annotated coverage report |
-| `trace.log` | Strace-format decoded syscall log |
+| `trace.log` | Strace-format syscall log |
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
-| `fuzz.log` | Fuzzer rankings (similarity, coverage, novelty) |
 
-## Build Options
+## Build
 
 ```bash
-make                    # default (includes eBPF backend)
-make CC=clang           # use clang
-make CC=gcc             # use gcc
+make CC=clang           # recommended
+make CC=gcc             # alternative
 ```
 
 ## License
 
 See [LICENSE](LICENSE).
 
-![vock](https://github.com/user-attachments/assets/69531851-8776-42ed-82f9-dac937f089de)
