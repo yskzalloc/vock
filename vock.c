@@ -453,6 +453,7 @@ int main(int argc, char *argv[])
 "  vock /bin/ip addr show              kernel coverage (HW mode, default)\n"
 "  vock --vmlinux vmlinux /bin/ip addr show   full branch coverage\n"
 "  vock --mode kcov /bin/ls /tmp       kernel coverage (KCOV)\n"
+"  vock --mode kcov --ordered /bin/ip addr show  per-TID sequential trace\n"
 "  vock --syscall /bin/ls /tmp         syscall tracking\n"
 "  vock --syzlang /bin/ip addr show    trace.log + trace.syz\n"
 "  vock fuzz -procs=8 /bin/ip route    fuzz with 8 workers\n"
