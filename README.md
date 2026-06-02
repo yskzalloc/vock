@@ -74,6 +74,37 @@ sudo ./vock fuzz -repeat=100 -procs=8 /bin/ip addr show
 
 See [FUZZ.md](FUZZ.md) for details.
 
+## Using with virtme-ng
+
+vock integrates with [virtme-ng](https://github.com/arighi/virtme-ng) for testing custom kernels in lightweight VMs. This is useful for running vock against kernels with specific configs (KCOV, debug info) without rebooting your host.
+
+Install virtme-ng:
+```bash
+python3 -m venv venv-virtme
+source venv-virtme/bin/activate
+pip3 install git+https://github.com/arighi/virtme-ng.git
+```
+
+### KCOV mode in VM
+
+Build a kernel with KCOV and run vock inside it:
+```bash
+cd /path/to/linux
+vng --configitem CONFIG_KCOV=y --configitem CONFIG_KCOV_INSTRUMENT_ALL=y --build LLVM=-21
+vng --rw -- /path/to/vock --mode kcov --vmlinux vmlinux /bin/ip addr show
+```
+
+### Hardware mode in VM (AMD LBR)
+
+AMD LBR works inside KVM guests. Build a kernel without KCOV to verify HW-only coverage:
+```bash
+cd /path/to/linux
+vng --configitem CONFIG_KCOV=n --configitem CONFIG_PERF_EVENTS=y --build LLVM=-21
+vng --rw -- /path/to/vock --mode hw --vmlinux vmlinux /bin/ip addr show
+```
+
+Note: Intel PT requires host passthrough and is typically unavailable in guests. Use `--on host` for Intel PT testing.
+
 ## Kernel Configuration
 
 Each feature requires specific kernel configs:
