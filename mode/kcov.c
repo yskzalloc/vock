@@ -228,6 +228,10 @@ static void kcov_dtor(void)
 	if (getpid() != initial_pid)
 		return;
 
+	/* Skip merge in ordered mode */
+	if (getenv("VOCK_NO_MERGE"))
+		return;
+
 	FILE *merged = fopen("kerncov.log", "w");
 	if (!merged)
 		return;

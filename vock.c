@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <libgen.h>
+#include <dirent.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -125,7 +126,8 @@ static int run_report(const char *report_path,
 }
 static int run_kcov_mode(int argc, char *argv[], int cmd_idx,
 			 const char *kernel_src, const char *vmlinux,
-			 const char *filter, int btf, int ctx_after, int ctx_before)
+			 const char *filter, int btf, int ctx_after, int ctx_before,
+			 int ordered)
 {
 	char exe_path[1024];
 	char *exe_dir;
@@ -155,6 +157,8 @@ static int run_kcov_mode(int argc, char *argv[], int cmd_idx,
 	pid = fork();
 	if (pid == 0) {
 		setenv("LD_PRELOAD", preload_path, 1);
+		if (ordered)
+			setenv("VOCK_NO_MERGE", "1", 1);
 		execvp(argv[cmd_idx], &argv[cmd_idx]);
 		perror("target: execvp failed");
 		_exit(127);
@@ -170,11 +174,85 @@ static int run_kcov_mode(int argc, char *argv[], int cmd_idx,
 	ioctl(rfd, KCOV_DISABLE, 0);
 	munmap(rarea, COVER_SZ * sizeof(unsigned long));
 	close(rfd);
-	fprintf(stderr, "[vock] generating report\n");
+
 	snprintf(report_path, sizeof(report_path), "%s/output.py", exe_dir);
-	ret = run_report(report_path, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
-	if (ret)
-		fprintf(stderr, "report: exit code %d\n", ret);
+
+	if (ordered) {
+		/* Generate coverage-<TID>.html for each per-TID log */
+		DIR *d = opendir(".");
+		if (d) {
+			struct dirent *ent;
+			while ((ent = readdir(d)) != NULL) {
+				if (strncmp(ent->d_name, "local-", 6) != 0)
+					continue;
+				if (!strstr(ent->d_name, ".log"))
+					continue;
+				/* Extract TID from local-<TID>.log */
+				char tid_str[32];
+				const char *s = ent->d_name + 6;
+				const char *dot = strstr(s, ".log");
+				if (!dot || (dot - s) >= (int)sizeof(tid_str))
+					continue;
+				memcpy(tid_str, s, dot - s);
+				tid_str[dot - s] = '\0';
+
+				char out_name[64];
+				snprintf(out_name, sizeof(out_name), "coverage-%s.html", tid_str);
+
+				char *argv_exec[24];
+				int idx = 0;
+				char a_buf[16], b_buf[16];
+				argv_exec[idx++] = (char *)"python3";
+				argv_exec[idx++] = (char *)report_path;
+				argv_exec[idx++] = (char *)"--log";
+				argv_exec[idx++] = ent->d_name;
+				argv_exec[idx++] = (char *)"-o";
+				argv_exec[idx++] = out_name;
+				argv_exec[idx++] = (char *)"--ordered";
+				if (btf)
+					argv_exec[idx++] = (char *)"--btf";
+				if (kernel_src) {
+					argv_exec[idx++] = (char *)"--kernel-src";
+					argv_exec[idx++] = (char *)kernel_src;
+				}
+				if (vmlinux) {
+					argv_exec[idx++] = (char *)"--vmlinux";
+					argv_exec[idx++] = (char *)vmlinux;
+				}
+				if (filter) {
+					argv_exec[idx++] = (char *)"--filter";
+					argv_exec[idx++] = (char *)filter;
+				}
+				if (ctx_after >= 0) {
+					snprintf(a_buf, sizeof(a_buf), "%d", ctx_after);
+					argv_exec[idx++] = (char *)"-A";
+					argv_exec[idx++] = a_buf;
+				}
+				if (ctx_before >= 0) {
+					snprintf(b_buf, sizeof(b_buf), "%d", ctx_before);
+					argv_exec[idx++] = (char *)"-B";
+					argv_exec[idx++] = b_buf;
+				}
+				argv_exec[idx] = NULL;
+
+				pid_t rpid = fork();
+				if (rpid == 0) {
+					execvp("python3", argv_exec);
+					_exit(127);
+				} else if (rpid > 0) {
+					int rs;
+					waitpid(rpid, &rs, 0);
+				}
+				fprintf(stderr, "[vock] %s → %s\n", ent->d_name, out_name);
+			}
+			closedir(d);
+		}
+	} else {
+		fprintf(stderr, "[vock] generating report\n");
+		ret = run_report(report_path, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
+		if (ret)
+			fprintf(stderr, "report: exit code %d\n", ret);
+	}
 	return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 static int run_hw_mode(int argc, char *argv[], int cmd_idx, const char *vmlinux,
@@ -312,6 +390,7 @@ int main(int argc, char *argv[])
 	int fuzz_kcov = 0;
 	const char *syscall_backend = "ptrace";
 	int ctx_after = -1, ctx_before = -1;
+	int ordered = 0;
 	int cmd_idx = -1;
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "selftest")) {
@@ -366,6 +445,7 @@ int main(int argc, char *argv[])
 "  --kernel-src PATH   kernel source for coverage report\n"
 "  --vmlinux FILE      vmlinux with debug info (enables full branch coverage)\n"
 "  --btf               resolve PCs via /proc/kallsyms (no vmlinux needed)\n"
+"  --ordered           per-TID sequential output (coverage-<TID>.html)\n"
 "  --filter KW         filter coverage report to matching paths\n"
 "  -A N, -B N          context lines in coverage report\n"
 "\n"
@@ -385,6 +465,8 @@ int main(int argc, char *argv[])
 			vmlinux = argv[++i];
 		} else if (!strcmp(argv[i], "--btf")) {
 			btf = 1;
+		} else if (!strcmp(argv[i], "--ordered")) {
+			ordered = 1;
 		} else if (!strcmp(argv[i], "--filter") && i + 1 < argc) {
 			filter = argv[++i];
 		} else if (!strcmp(argv[i], "-A") && i + 1 < argc) {
@@ -622,7 +704,7 @@ int main(int argc, char *argv[])
 	int cov_ret = 1;
 	switch (mode) {
 	case MODE_KCOV:
-		cov_ret = run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before);
+		cov_ret = run_kcov_mode(argc, argv, cmd_idx, kernel_src, vmlinux, filter, btf, ctx_after, ctx_before, ordered);
 		break;
 	case MODE_HW:
 		cov_ret = run_hw_mode(argc, argv, cmd_idx, vmlinux, kernel_src, filter, btf, ctx_after, ctx_before);
