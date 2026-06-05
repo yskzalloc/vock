@@ -231,6 +231,7 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True,
         "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_DWARF5": True,
         "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_DEBUG_INFO_BTF": True,
@@ -353,8 +354,8 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": False,
         "CONFIG_PERF_EVENTS": True, "CONFIG_CPU_SUP_INTEL": True,
         "CONFIG_BPF_SYSCALL": True, "CONFIG_DEBUG_INFO_BTF": True,
-        "CONFIG_DEBUG_INFO": True, "CONFIG_DEBUG_INFO_DWARF5": True,
-        "CONFIG_DEBUG_INFO_NONE": False,
+        "CONFIG_DEBUG_INFO": True, "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
+        "CONFIG_DEBUG_INFO_DWARF5": True, "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
@@ -463,6 +464,7 @@ def test_filter(vock_dir, kernel_src, arch_info):
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_BPF_SYSCALL": True,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_DWARF5": True, "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_NET": True, "CONFIG_INET": True, "CONFIG_VETH": True,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
@@ -545,6 +547,7 @@ def test_btf(vock_dir, kernel_src, arch_info):
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO_DWARF5": True,
         "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
@@ -614,6 +617,7 @@ def test_crypto(vock_dir, kernel_src, arch_info):
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO_DWARF5": True,
         "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_CRYPTO": True, "CONFIG_CRYPTO_XTS": True,

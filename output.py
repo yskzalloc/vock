@@ -133,7 +133,7 @@ def main():
 
         # Generate HTML with highlighted source lines if kernel-src available
         kernel_src = args.kernel_src if args.kernel_src != DEFAULT_KERNEL_SRC else None
-        if kernel_src and os.path.isdir(kernel_src):
+        if kernel_src and path.isdir(kernel_src):
             generate_btf_html(ranked, kernel_src, args.output)
             if not args.quiet:
                 print(f"\033[92m✓ Written: {args.output} (source-highlighted)\033[0m")

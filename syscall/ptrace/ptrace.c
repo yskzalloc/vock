@@ -17,6 +17,8 @@
 #define SC_RET(regs)  ((regs).rax)
 #elif defined(__aarch64__)
 #include <asm/ptrace.h>
+#include <sys/uio.h>
+#include <linux/elf.h>
 #define SC_NR(regs)  ((regs).regs[8])
 #define SC_ARG0(regs) ((regs).regs[0])
 #define SC_ARG1(regs) ((regs).regs[1])
