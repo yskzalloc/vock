@@ -22,6 +22,13 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Enable KVM group perms
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+          | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+
     - name: Install dependencies
       run: |
         sudo apt-get update
@@ -33,16 +40,17 @@ jobs:
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
         pip3 install git+https://github.com/arighi/virtme-ng.git
-        echo "$PWD/venv-virtme/bin" >> $GITHUB_PATH
 
-        if [ -w /dev/kvm ]; then
-          echo "VM_TARGET=vng-kvm" >> $GITHUB_ENV
-        else
-          echo "VM_TARGET=vng-tcg" >> $GITHUB_ENV
-        fi
-
+        echo "#### INFO ####"
         clang --version | head -1
         uname -m
+        if [ -w /dev/kvm ]; then
+           echo "Can use KVM guest mode"
+        else
+           echo "Can't use KVM guest mode"
+        fi
+        echo "##############"
+
         git clone -b staging-testing --depth 1 \
           https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
 
@@ -56,16 +64,31 @@ jobs:
       run: |
         make CC=clang
 
-    - name: "Test 1: KCOV + syscall syzlang engines"
+    - name: vock selftest
       run: |
         source venv-virtme/bin/activate
-        ./vock selftest 1 --on $VM_TARGET --kernel-src staging
 
-    - name: "Test 2.1: VM Guest HW + syscall syzlang engines"
-      run: |
-        source venv-virtme/bin/activate
-        ./vock selftest 2 --on $VM_TARGET --kernel-src staging
+        set +e
 
-    - name: "Test 2.2: Host HW + syscall syzlang engines"
-      run: |
+        echo "Test 1: KCOV + syscall syzlang engines on KVM guest"
+
+        ./vock selftest 1 --on vng-kvm --kernel-src staging
+
+        echo "Test 2.1: Host HW + syscall syzlang engines"
+
         sudo ./vock selftest 2 --on host --kernel-src staging
+
+        echo "Test 2.2: KVM Guest HW + syscall syzlang engines"
+
+        ./vock selftest 2 --on vng-kvm --kernel-src staging
+
+        echo "Test 2.3: KVM Guest HW + syscall syzlang engines"
+
+        ./vock selftest 2 --on vng-tcg --kernel-src staging
+
+        set -e
+
+    - name: "Report"
+      run: |
+        sudo dmesg
+
