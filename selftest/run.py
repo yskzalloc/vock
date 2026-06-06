@@ -132,7 +132,7 @@ def kernel_set_config(kernel_src, configs):
 def kernel_build(kernel_src):
     """Build kernel using vng --build (handles 9p/VFS properly)."""
     print("  Building kernel...")
-    r = run(["vng", f"LLVM={LLVM_SUFFIX}", "--build"], cwd=kernel_src, timeout=1800)
+    r = run(["vng", f"LLVM={LLVM_SUFFIX}", "--build"], cwd=kernel_src, timeout=3600)
     return r.returncode == 0
 
 
@@ -150,7 +150,7 @@ def kernel_configure_and_build(kernel_src, configs):
         else:
             cmd += ["--configitem", f"{key}=n"]
     cmd += ["--build", f"LLVM={LLVM_SUFFIX}"]
-    r = run(cmd, cwd=kernel_src, timeout=1800)
+    r = run(cmd, cwd=kernel_src, timeout=3600)
     if r.returncode != 0:
         vlog(r)
     return r.returncode == 0
