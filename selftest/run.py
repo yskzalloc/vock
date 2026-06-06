@@ -249,7 +249,7 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         return False
     log("PASS", "kernel configured + built")
 
-    vmlinux = os.path.join(kernel_src, "vmlinux")
+    vmlinux = vmlinux_path
 
     # ─── Group A: KCOV + vmlinux (source-level report) ───────────────────────
     print("\n── Group A: KCOV + vmlinux + syzlang ──")
@@ -364,7 +364,7 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
     log("PASS", "kernel configured + built")
 
     print(f"\n[Test: {hw_type} + each --syscall]")
-    vmlinux = os.path.join(kernel_src, "vmlinux")
+    vmlinux = vmlinux_path
 
     # Intel PT requires perf_event_paranoid <= 1 or root
     perf_pre = "echo -1 | sudo -n tee /proc/sys/kernel/perf_event_paranoid > /dev/null 2>&1 || true; "
@@ -474,7 +474,7 @@ def test_filter(vock_dir, kernel_src, arch_info):
         log("FAIL", "kernel configure+build failed"); return False
     log("PASS", "kernel configured + built")
 
-    vmlinux = os.path.join(kernel_src, "vmlinux")
+    vmlinux = vmlinux_path
 
     # Target: create/configure/destroy veth — exercises netlink write paths
     net_target = (
@@ -722,13 +722,17 @@ examples:
                         help="execution target (default: vng-kvm)")
     parser.add_argument("--kernel-src", default=None,
                         help="kernel source tree (default: $HOME/stable)")
+    parser.add_argument("--vmlinux", default=None,
+                        help="path to vmlinux (default: <kernel-src>/vmlinux)")
     parser.add_argument("--llvm", default=None,
                         help="LLVM suffix (e.g. -21, -20). Overrides auto-detect. Env: LLVM=")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="show command output for debugging")
     args = parser.parse_args()
 
-    kernel_src = args.kernel_src or os.path.join(os.path.expanduser("~"), "stable")
+    kernel_src = os.path.abspath(args.kernel_src or os.path.join(os.path.expanduser("~"), "stable"))
+    global vmlinux_path
+    vmlinux_path = os.path.abspath(args.vmlinux) if args.vmlinux else os.path.join(kernel_src, "vmlinux")
     vock_dir = find_vock_dir()
 
     global LLVM_SUFFIX, RUN_TARGET, VERBOSE

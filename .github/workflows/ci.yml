@@ -82,35 +82,35 @@ jobs:
         if [ "$(uname -m)" = "x86_64" ]; then
             echo "Test 1: KCOV + syscall syzlang engines on KVM guest"
 
-            ./vock selftest 1 --on vng-kvm --kernel-src staging
+            ./vock selftest 1 --on vng-kvm --kernel-src staging --vmlinux staging/vmlinux
 
             echo "Test 2.1: Host HW + syscall syzlang engines"
 
-            sudo ./vock selftest 2 --on host --kernel-src staging
+            sudo ./vock selftest 2 --on host --kernel-src staging --vmlinux staging/vmlinux
 
             echo "Test 2.2: KVM Guest HW + syscall syzlang engines"
 
-            ./vock selftest 2 --on vng-kvm --kernel-src staging
+            ./vock selftest 2 --on vng-kvm --kernel-src staging --vmlinux staging/vmlinux
 
             echo "Test 2.3: KVM Guest HW + syscall syzlang engines"
 
-            ./vock selftest 2 --on vng-kvm --kernel-src staging
+            ./vock selftest 2 --on vng-kvm --kernel-src staging --vmlinux staging/vmlinux
         else
              echo "Test 1: KCOV + syscall syzlang engines on KVM guest"
 
-             ./vock selftest 1 --on vng-tcg --kernel-src staging
+             ./vock selftest 1 --on vng-tcg --kernel-src staging --vmlinux staging/vmlinux
 
              echo "Test 2.1: Host HW + syscall syzlang engines"
 
-             sudo ./vock selftest 2 --on host --kernel-src staging
+             sudo ./vock selftest 2 --on host --kernel-src staging --vmlinux staging/vmlinux
 
              echo "Test 2.2: VM Guest HW + syscall syzlang engines"
 
-            ./vock selftest 2 --on vng-tcg --kernel-src staging
+            ./vock selftest 2 --on vng-tcg --kernel-src staging --vmlinux staging/vmlinux
 
              echo "Test 2.3: VM Guest HW + syscall syzlang engines"
 
-            ./vock selftest 2 --on vng-tcg --kernel-src staging
+            ./vock selftest 2 --on vng-tcg --kernel-src staging --vmlinux staging/vmlinux
         fi
 
         set -e
