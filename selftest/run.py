@@ -273,9 +273,11 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
             "bash", "-c",
             f"rm -f kerncov.log coverage.html trace.log trace.syz local-*.log remote-*.log && "
             f"{sud_pre}{crypto_prepare()} && "
+            f"pwd && "
             f"{vock_dir}/vock --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
-            f"ls -la local-*.log remote-*.log 2>&1 && "
+            f"echo CWD=$(pwd) && ls -la local-*.log remote-*.log kerncov.log 2>&1 && "
+            f"find / -name 'local-*.log' 2>/dev/null | head -5 && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && "
             f"[ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && "
