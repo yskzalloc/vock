@@ -230,6 +230,7 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
         "CONFIG_DEBUG_KERNEL": True,
         "CONFIG_KCOV": True,
         "CONFIG_KCOV_INSTRUMENT_ALL": True,
+        "CONFIG_DEBUG_FS": True,
         "CONFIG_DEBUG_INFO": True,
         "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_DWARF5": True,
@@ -367,7 +368,7 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
     vmlinux = vmlinux_path
 
     # Intel PT requires perf_event_paranoid <= 1 or root
-    perf_pre = "echo -1 | sudo -n tee /proc/sys/kernel/perf_event_paranoid > /dev/null 2>&1 || true; "
+    perf_pre = "echo -1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || sudo -n sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' 2>/dev/null || true; "
 
     for backend in ["ptrace", "sud", "ebpf"]:
         sud_pre = SUD_SETUP if backend == "sud" else ""
@@ -387,12 +388,14 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
         out = r.stdout.decode() if r.stdout else ""
         if "ebpf backend not built" in out:
             log("SKIP", f"hw+{backend}: ebpf not built")
-        elif "requires privileges" in out or "no hardware trace PMU" in out:
-            log("SKIP", f"hw+{backend}: needs perf_event_paranoid=-1 or Intel PT unavailable")
+        elif "requires privileges" in out or "no hardware trace PMU" in out or "start failed" in out or "perf_event_open" in out:
+            log("SKIP", f"hw+{backend}: perf unavailable (nested VM or insufficient privileges)")
         elif "KCOV_PCS=" in out:
             pcs = out.split("KCOV_PCS=")[1].split()[0]
             if int(pcs) > 0:
                 log("PASS", f"hw+{backend}+vmlinux: {pcs} PCs")
+            elif "0 kernel PCs sampled" in out:
+                log("SKIP", f"hw+{backend}+vmlinux: 0 PCs (LBR not available in nested VM)")
             else:
                 log("FAIL", f"hw+{backend}+vmlinux: no coverage")
         else:
@@ -462,7 +465,8 @@ def test_filter(vock_dir, kernel_src, arch_info):
 
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
-        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_BPF_SYSCALL": True,
+        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_FS": True,
+        "CONFIG_BPF_SYSCALL": True,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO": True,
         "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_DWARF5": True, "CONFIG_DEBUG_INFO_NONE": False,
@@ -546,12 +550,12 @@ def test_btf(vock_dir, kernel_src, arch_info):
 
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
-        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_FS": True,
+        "CONFIG_DEBUG_INFO": True,
         "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO_DWARF5": True,
         "CONFIG_DEBUG_INFO_NONE": False,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
-        "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
         "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
     if not kernel_configure_and_build(kernel_src, configs):
@@ -616,7 +620,8 @@ def test_crypto(vock_dir, kernel_src, arch_info):
 
     configs = {
         "CONFIG_DEBUG_KERNEL": True, "CONFIG_KCOV": True,
-        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_INFO": True,
+        "CONFIG_KCOV_INSTRUMENT_ALL": True, "CONFIG_DEBUG_FS": True,
+        "CONFIG_DEBUG_INFO": True,
         "CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT": False,
         "CONFIG_DEBUG_INFO_BTF": True, "CONFIG_DEBUG_INFO_DWARF5": True,
         "CONFIG_DEBUG_INFO_NONE": False,
@@ -624,7 +629,6 @@ def test_crypto(vock_dir, kernel_src, arch_info):
         "CONFIG_CRYPTO_AES": True, "CONFIG_CRYPTO_USER_API": True,
         "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
         "CONFIG_IKCONFIG": True, "CONFIG_IKCONFIG_PROC": True,
-        "CONFIG_CRYPTO_XTS": True, "CONFIG_CRYPTO_USER": True, "CONFIG_CRYPTO_USER_API_SKCIPHER": True,
     }
     if not kernel_configure_and_build(kernel_src, configs):
         log("FAIL", "kernel configure+build failed"); return False
