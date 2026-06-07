@@ -144,14 +144,14 @@ def kernel_configure_and_build(kernel_src, configs):
 
     print("  Configuring + building kernel...")
 
-    # Use scripts/config to force config options (vng --configitem is unreliable
-    # when .config already exists from a previous build)
+    # Use scripts/config to set options before vng --build.
+    # Don't run make olddefconfig here — vng --build does it internally
+    # and adds required virtio/9p configs for VM boot.
     script = os.path.join(kernel_src, "scripts/config")
     if os.path.isfile(script):
         for key, enable in configs.items():
             flag = "--enable" if enable else "--disable"
             run([script, flag, key], cwd=kernel_src, timeout=30)
-        run(["make", f"LLVM={LLVM_SUFFIX}", "olddefconfig"], cwd=kernel_src, timeout=120)
 
     cmd = ["vng"]
     for key, enable in configs.items():
