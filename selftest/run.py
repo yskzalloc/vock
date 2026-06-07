@@ -137,12 +137,22 @@ def kernel_build(kernel_src):
 
 
 def kernel_configure_and_build(kernel_src, configs):
-    """Configure + build in one step using vng --configitem + --build."""
+    """Configure + build in one step. Uses scripts/config for reliability."""
     if RUN_TARGET == "host":
         # On host, don't build — assume kernel is already built
         return True
 
     print("  Configuring + building kernel...")
+
+    # Use scripts/config to force config options (vng --configitem is unreliable
+    # when .config already exists from a previous build)
+    script = os.path.join(kernel_src, "scripts/config")
+    if os.path.isfile(script):
+        for key, enable in configs.items():
+            flag = "--enable" if enable else "--disable"
+            run([script, flag, key], cwd=kernel_src, timeout=30)
+        run(["make", f"LLVM={LLVM_SUFFIX}", "olddefconfig"], cwd=kernel_src, timeout=120)
+
     cmd = ["vng"]
     for key, enable in configs.items():
         if enable:
@@ -152,8 +162,18 @@ def kernel_configure_and_build(kernel_src, configs):
     cmd += ["--build", f"LLVM={LLVM_SUFFIX}"]
     r = run(cmd, cwd=kernel_src, timeout=3600)
     if r.returncode != 0:
-        vlog(r)
-    return r.returncode == 0
+        vlog(r, force=True)
+        return False
+
+    # Verify critical configs were actually applied
+    config_path = os.path.join(kernel_src, ".config")
+    if os.path.isfile(config_path):
+        with open(config_path) as f:
+            config_text = f.read()
+        for key, enable in configs.items():
+            if enable and f"{key}=y" not in config_text:
+                print(f"  WARNING: {key}=y not found in .config!")
+    return True
 
 
 def vng_run(kernel_src, cmd):
@@ -212,6 +232,9 @@ def vlog(r, force=False):
         return
     out = r.stdout.decode() if r.stdout else ""
     err = r.stderr.decode() if r.stderr else ""
+    if not out and not err:
+        print(f"    (no output, rc={r.returncode})")
+        return
     if out:
         for line in out.strip().split('\n')[-20:]:
             print(f"    | {line}")
@@ -404,7 +427,7 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
                 log("FAIL", f"hw+{backend}+vmlinux: no coverage")
                 vlog(r, force=True)
         else:
-            log("FAIL", f"hw+{backend}+vmlinux: failed")
+            log("FAIL", f"hw+{backend}+vmlinux: failed (rc={r.returncode})")
             vlog(r, force=True)
         if "TRACE_OK=" in out:
             log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
