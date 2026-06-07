@@ -255,15 +255,27 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
     # ─── Group A: KCOV + vmlinux (source-level report) ───────────────────────
     print("\n── Group A: KCOV + vmlinux + syzlang ──")
 
+    # Diagnostic: verify KCOV is actually enabled in the running kernel
+    diag = vng_run(kernel_src, [
+        "bash", "-c",
+        "zcat /proc/config.gz 2>/dev/null | grep -E 'KCOV|DEBUG_FS' || "
+        "grep -E 'KCOV|DEBUG_FS' /boot/config-$(uname -r) 2>/dev/null || echo NO_CONFIG; "
+        "ls -la /sys/kernel/debug/kcov 2>&1; "
+        "cat /proc/version"
+    ])
+    if diag.stdout:
+        print("  [diag] " + diag.stdout.decode().replace('\n', '\n  [diag] ').rstrip())
+
     for backend in ["ptrace", "sud", "ebpf"]:
         print(f"\n[Test: --mode kcov --syzlang --syscall {backend} --vmlinux]")
         sud_pre = SUD_SETUP if backend == "sud" else ""
         r = vng_run(kernel_src, [
             "bash", "-c",
-            f"rm -f kerncov.log coverage.html trace.log trace.syz && "
+            f"rm -f kerncov.log coverage.html trace.log trace.syz local-*.log remote-*.log && "
             f"{sud_pre}{crypto_prepare()} && "
             f"{vock_dir}/vock --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {kernel_src} {CRYPTO_TARGET} 2>&1; "
             f"echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && "
+            f"ls -la local-*.log remote-*.log 2>&1 && "
             f"[ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && "
             f"grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && "
             f"[ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && "
