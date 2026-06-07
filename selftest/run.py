@@ -206,9 +206,9 @@ CRYPTO_TARGET = "/bin/sh /tmp/dec.sh"
 VERBOSE = False
 
 
-def vlog(r):
-    """Print command output if --verbose."""
-    if not VERBOSE:
+def vlog(r, force=False):
+    """Print command output if --verbose or force=True."""
+    if not VERBOSE and not force:
         return
     out = r.stdout.decode() if r.stdout else ""
     err = r.stderr.decode() if r.stderr else ""
@@ -279,8 +279,10 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
                 log("PASS", f"kcov+{backend}+vmlinux: {pcs} PCs")
             else:
                 log("FAIL", f"kcov+{backend}+vmlinux: no coverage")
+                vlog(r, force=True)
         else:
             log("FAIL", f"kcov+{backend}+vmlinux: failed")
+            vlog(r, force=True)
         if "TRACE_OK=" in out:
             log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
         if "FMT_OK" in out:
@@ -317,8 +319,10 @@ def test_default(vock_dir, kernel_src, arch_info, syscall_on):
                 log("PASS", f"kcov+{backend}+btf: {pcs} PCs")
             else:
                 log("FAIL", f"kcov+{backend}+btf: no coverage")
+                vlog(r, force=True)
         else:
             log("FAIL", f"kcov+{backend}+btf: failed")
+            vlog(r, force=True)
         if "TRACE_OK=" in out:
             log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
         if "FMT_OK" in out:
@@ -398,8 +402,10 @@ def test_intel_pt(vock_dir, kernel_src, arch_info):
                 log("SKIP", f"hw+{backend}+vmlinux: 0 PCs (LBR not available in nested VM)")
             else:
                 log("FAIL", f"hw+{backend}+vmlinux: no coverage")
+                vlog(r, force=True)
         else:
             log("FAIL", f"hw+{backend}+vmlinux: failed")
+            vlog(r, force=True)
         if "TRACE_OK=" in out:
             log("PASS", f"  trace.log: {out.split('TRACE_OK=')[1].split()[0]} syscalls")
         if "FMT_OK" in out:
