@@ -1,0 +1,13 @@
+[package]
+name = "kcov-preload"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "kcov_preload"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+libc = "0.2"

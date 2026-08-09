@@ -5,21 +5,58 @@
 Map any userspace program to the exact kernel code it exercises.
 
 ```bash
-sudo ./vock --vmlinux vmlinux /bin/ip addr show
+sudo ./vock.bin --vmlinux vmlinux /bin/ip addr show
 # → kerncov.log + coverage.html
 ```
 
+vock is written in Rust — a full port of the original C/Python, with no C
+remaining and `libc` as the only crate dependency. `make` produces `./vock.bin`
+and the `mode/kcov.so` LD_PRELOAD coverage shim.
+
+**Status.** All four selftests pass on x86_64. `selftest 1` (KCOV) covers
+KCOV+vmlinux and KCOV+BTF across all three syscall backends (`ptrace`, `sud`,
+`ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 3`
+(crypto) passes; `selftest 4` reproduces a real KASAN use-after-free from the
+bundled sample. `selftest 2` (HW trace) traces with Intel PT on bare metal
+(`--on host`, root or `perf_event_paranoid ≤ 1`). The `sud` backend
+traces up to and including the target's `execve` (the LD_PRELOAD re-injection
+that keeps tracing past exec is not yet ported). HW trace (Intel PT / AMD LBR /
+CoreSight) is ported and builds; arm64 and AMD are validated in follow-up work.
+
+`vock execprog` is a **syz-execprog-style executor**: it replays a program
+with `-repeat`/`-procs` and can attribute KCOV coverage to each call. An
+unmodified syzbot reproducer works, including the `&(0x7f…)` memory layout,
+resource wiring and 13 of the `syz_*` pseudo-syscalls; the rest return `ENOSYS`
+and are named on startup. `execprog -stress` mutates the program and loops it,
+mirroring `syz-execprog -stress`.
+
+`vock fuzz` is **not implemented** and prints a notice explaining why:
+coverage-guided mutation needs an edge signal that is not wired in yet. See
+[FUZZ.md](FUZZ.md).
+
 ## Install
 
-Debian/Ubuntu:
+Toolchain (Rust, via [rustup](https://rustup.rs)):
 ```bash
-sudo apt install clang libelf-dev linux-headers-$(uname -r)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Optional runtime helpers:
+```bash
+sudo apt install binutils   # addr2line, nm — source-annotated reports
+sudo apt install clang      # only to build test kernels in `vock selftest`
+```
+
+Or build a package (see [Build](#build)):
+```bash
+./debian/get-vendor.sh && dpkg-buildpackage -us -uc -b
+sudo apt install ../vock_0.1.0-1_*.deb
 ```
 
 Build:
 ```bash
 git clone https://github.com/yskzalloc/vock && cd vock
-make CC=clang
+make            # wraps `cargo build --release`; places ./vock.bin and mode/kcov.so
 ```
 
 ## Usage
@@ -30,18 +67,19 @@ Works on **any kernel** — no CONFIG_KCOV needed:
 
 ```bash
 # Full branch coverage (needs vmlinux for TNT decoding)
-sudo ./vock --vmlinux /boot/vmlinux-$(uname -r) /bin/ip addr show
+sudo ./vock.bin --vmlinux /boot/vmlinux-$(uname -r) /bin/ip addr show
 # → kerncov.log + coverage.html
 
 # Function-entry only (no vmlinux)
-sudo ./vock /bin/ip addr show
+sudo ./vock.bin /bin/ip addr show
 # → kerncov.log
 ```
 
-If not running as root:
+If not running as root — the kernel only forbids kernel profiling at
+`perf_event_paranoid >= 2`, so 1 is enough:
 ```bash
-echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
-./vock --vmlinux vmlinux /bin/ip addr show
+echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+./vock.bin --vmlinux vmlinux /bin/ip addr show
 ```
 
 ### 2. KCOV Mode
@@ -49,7 +87,7 @@ echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 Per-task kernel coverage including remote (softirqs, workqueues):
 
 ```bash
-sudo ./vock --mode kcov /bin/ip addr show
+sudo ./vock.bin --mode kcov /bin/ip addr show
 # → kerncov.log (local + remote) + coverage.html
 ```
 
@@ -58,21 +96,24 @@ Tracks coverage across `fork()` and `pthread_create()` — each child gets its o
 ### 3. Syscall Tracking
 
 ```bash
-sudo ./vock --syscall /bin/ls /tmp
+sudo ./vock.bin --syscall /bin/ls /tmp
 # → kerncov.log + trace.log
 
-sudo ./vock --syzlang /bin/ip addr show
+sudo ./vock.bin --syzlang /bin/ip addr show
 # → kerncov.log + trace.log + trace.syz (for syz-trace2syz)
 ```
 
-### 4. Fuzzing (experimental)
+### 4. Program execution (syz-execprog style)
+
+Replay a program, or use it as a seed and loop mutated variants (`-stress`):
 
 ```bash
-sudo ./vock fuzz /bin/ip addr show
-sudo ./vock fuzz -repeat=100 -procs=8 /bin/ip addr show
+sudo ./vock.bin --syzlang /bin/ip addr show           # capture a program
+./vock.bin execprog -stress -procs=8 trace.syz       # mutate + execute in a loop
+sudo ./vock.bin execprog trace.syz                    # replay a saved program
 ```
 
-See [FUZZ.md](FUZZ.md) for details.
+See [FUZZ.md](FUZZ.md) for details and current limitations.
 
 ## Using with virtme-ng
 
@@ -145,7 +186,7 @@ CONFIG_IKCONFIG=y
 CONFIG_IKCONFIG_PROC=y
 ```
 
-### Crypto Subsystem Coverage (selftest 6)
+### Crypto Subsystem Coverage (selftest 3)
 
 ```
 CONFIG_CRYPTO_XTS=y
@@ -189,11 +230,11 @@ echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 
 ```bash
 # 1. What kernel code does the target reach?
-sudo ./vock --vmlinux vmlinux /bin/ip addr show
+sudo ./vock.bin --vmlinux vmlinux /bin/ip addr show
 # → kerncov.log (5000+ kernel PCs)
 
 # 2. Get syscall trace for syzkaller
-sudo ./vock --syzlang /bin/ip addr show
+sudo ./vock.bin --syzlang /bin/ip addr show
 # → trace.syz
 
 # 3. Feed to syzkaller
@@ -203,14 +244,21 @@ syz-trace2syz -file trace.syz
 
 ## Selftest
 
+Four tests (see [SELFTEST.md](SELFTEST.md) for details):
+
 ```bash
-./vock selftest 1 --on vng-kvm       # KCOV + syscall engines (VM)
-./vock selftest 2 --on vng-kvm       # AMD LBR (VM)
-sudo ./vock selftest 2 --on host     # Intel PT (bare metal)
-./vock selftest --help                # all options
+./vock.bin selftest 1 --on vng-kvm       # KCOV + all syscall engines + reporting (VM)
+sudo ./vock.bin selftest 2 --on host     # HW trace, auto-selected for the host CPU
+./vock.bin selftest 3 --on vng-kvm       # --filter + xts(aes) crypto coverage (VM)
+./vock.bin selftest 4 --on vng-kvm       # KASAN bug hunt: loop a sample repro ≤30 min
+./vock.bin selftest      --on vng-kvm    # all four
+./vock.bin selftest --help               # all options
 ```
 
-See [SELFTEST.md](SELFTEST.md) for details.
+Test 2 detects the host CPU and runs the matching engine — Intel PT or AMD LBR
+on x86_64, CoreSight on arm64. Intel PT and CoreSight need `--on host` (and
+either root or `perf_event_paranoid ≤ 1`); AMD LBR also works under `--on
+vng-kvm`.
 
 ## Output Files
 
@@ -219,17 +267,52 @@ See [SELFTEST.md](SELFTEST.md) for details.
 | `kerncov.log` | Merged kernel coverage (all per-TID logs combined) |
 | `local-<TID>.log` | Per-task KCOV coverage (direct syscall paths) |
 | `remote-<TID>.log` | Per-task remote coverage (softirqs, workqueues) |
+| `remote_coverage.log` | Remote coverage collected by the parent |
+| `kerncov_prog1.<N>` | Per-call coverage from `execprog -cover` |
+| `kerncov_prog1.extra` | Background coverage belonging to no single call |
 | `coverage.html` | Source-annotated coverage report |
+| `coverage-<TID>.html` | Per-thread report from `--ordered` |
 | `trace.log` | Strace-format syscall log |
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
+
+All coverage logs carry `PreviousInstructionPC`-shifted PCs, syzkaller's
+convention — see [FUZZ.md](FUZZ.md) → *PC convention*.
 
 ## Build
 
 ```bash
-make CC=clang
+make                 # or: cargo build --release
 ```
 
-Note: This project is not tested with gcc. There is no plan to support gcc yet.
+vock is a Cargo workspace with two members at the repo root:
+
+| Directory | Produces | What it is |
+|---|---|---|
+| `vock/` | `target/release/vock` → `./vock.bin` | The `vock` binary |
+| `kcov-preload/` | `target/release/libkcov_preload.so` → `mode/kcov.so` | The `LD_PRELOAD` coverage shim |
+
+`make` builds both and copies the artifacts into place. The binary is
+`./vock.bin`, not `./vock`, because the crate directory at the repo root is
+already named `vock/` — a file of the same name cannot coexist with it.
+
+The only build dependency is a Rust toolchain; the sole crate dependency is
+`libc`. There is no `build.rs`, no bindgen, and no C to compile — a `CC=...`
+argument is accepted and ignored for backwards compatibility.
+
+At runtime `vock` finds its shim by checking `$VOCK_KCOV_SO`, then
+`<dir of the binary>/mode/kcov.so` (the build tree), then the packaged
+locations such as `/usr/lib/vock/kcov.so`. So the same binary works from a
+build tree and from an installed package.
+
+### Debian package
+
+```bash
+./debian/get-vendor.sh          # vendor deps so the build works offline
+dpkg-buildpackage -us -uc -b    # → ../vock_0.1.0-1_<arch>.deb
+```
+
+Installs `/usr/bin/vock`, `/usr/lib/vock/kcov.so` and `vock(1)`. See
+`debian/README.Debian` for the privileges each mode needs.
 
 ## License
 

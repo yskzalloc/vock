@@ -1,0 +1,12 @@
+[package]
+name = "vock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "vock"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
