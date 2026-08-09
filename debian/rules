@@ -1,0 +1,58 @@
+#!/usr/bin/make -f
+# vock — Debian packaging.
+#
+# The upstream Makefile is a thin cargo wrapper; we drive cargo directly so we
+# can control the target directory and keep the build offline (Debian builds
+# have no network). Dependencies come from the vendored tree in debian/vendor,
+# populated by `debian/get-vendor.sh` and registered via .cargo/config.toml.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+export CARGO_HOME = $(CURDIR)/debian/cargo_home
+include /usr/share/dpkg/architecture.mk
+
+# A private helper directory, not a multiarch library path: kcov.so is loaded
+# by vock alone and the package is not Multi-Arch: same, so co-installability
+# across architectures does not apply. /usr/lib/vock is compiled into the
+# binary's search path, so no build-time path substitution is needed.
+LIBDIR = usr/lib/vock
+
+%:
+	dh $@
+
+# Point cargo at the vendored tree via CARGO_HOME so the upstream source
+# tree stays untouched (no root .cargo/config.toml to carry as a patch).
+debian/cargo_home/config.toml:
+	mkdir -p debian/cargo_home
+	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "$(CURDIR)/debian/vendor"\n' > $@
+
+override_dh_auto_build: debian/cargo_home/config.toml
+	cargo build --release --offline --locked
+
+override_dh_auto_test: debian/cargo_home/config.toml
+	cargo test --release --offline --locked
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/vock \
+	  debian/vock/usr/bin/vock
+	# The LD_PRELOAD coverage shim is a private helper, not a public library:
+	# it is dlopened by vock alone, has no SONAME and no stable ABI, so it
+	# belongs under a private directory rather than in the linker path.
+	install -D -m 0644 target/release/libkcov_preload.so \
+	  debian/vock/$(LIBDIR)/kcov.so
+
+override_dh_auto_clean:
+	cargo clean --offline || true
+	rm -rf debian/cargo_home
+
+# The shim is deliberately not a public shared library.
+override_dh_makeshlibs:
+	dh_makeshlibs -Xkcov.so
+
+override_dh_shlibdeps:
+	dh_shlibdeps -Xkcov.so
+
+# cargo vendor ships Cargo.toml.orig inside each crate and records it in
+# .cargo-checksum.json; dh_clean deletes *.orig by default, which would break
+# the checksum verification on the next build.
+override_dh_clean:
+	dh_clean -X.orig

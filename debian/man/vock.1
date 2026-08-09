@@ -1,0 +1,111 @@
+.TH VOCK 1 "August 2026" "vock 0.1.0" "User Commands"
+.SH NAME
+vock \- map a userspace program to the kernel code it exercises
+.SH SYNOPSIS
+.B vock
+[\fIOPTIONS\fR] \fIcommand\fR [\fIargs\fR...]
+.br
+.B vock
+\fIsubcommand\fR [\fIoptions\fR]
+.SH DESCRIPTION
+.B vock
+runs
+.I command
+and reports which kernel source lines it caused to execute, as an annotated
+HTML or terminal report.
+.PP
+Coverage comes from one of two sources. KCOV
+.RB ( \-\-mode
+.BR kcov )
+needs a kernel built with
+.BR CONFIG_KCOV ,
+and collects per-thread coverage through an LD_PRELOAD shim that follows
+.BR fork (2),
+.BR vfork (2)
+and
+.BR pthread_create (3).
+Hardware trace
+.RB ( \-\-mode
+.BR hw )
+needs no kernel instrumentation and uses Intel Processor Trace or AMD LBR on
+x86-64, or CoreSight ETM on arm64.
+.SH OPTIONS
+.TP
+.BR \-\-mode " " \fIkcov\fR|\fIhw\fR
+Coverage source. Default is hardware trace when available.
+.TP
+.BR \-\-vmlinux " " \fIPATH\fR
+Uninstrumented vmlinux with debug info, used to resolve addresses.
+.TP
+.BR \-\-kernel\-src " " \fIPATH\fR
+Kernel source tree, used to quote source lines in the report.
+.TP
+.B \-\-btf
+Resolve symbols through BTF and kallsyms instead of DWARF.
+.TP
+.BR \-\-filter " " \fIKEYWORD\fR
+Restrict the report to paths matching \fIKEYWORD\fR, e.g. \fBfs\fR.
+.TP
+.B \-\-ordered
+Emit one report per thread, \fIcoverage-<TID>.html\fR.
+.TP
+.BR \-\-syscall " " \fIptrace\fR|\fIsud\fR|\fIebpf\fR
+Backend used to trace the target's syscalls.
+.TP
+.B \-\-syzlang
+Also write the trace as a syzkaller program, \fItrace.syz\fR.
+.SH SUBCOMMANDS
+.TP
+.B report
+Regenerate a report from an existing coverage log.
+.TP
+.B execprog
+Replay a syzkaller program, including an unmodified syzbot reproducer, or a
+plain syscall trace. Supports per-call coverage with \fB\-cover\fR.
+.TP
+.B prog2c
+Convert a syscall trace into a standalone C reproducer.
+.TP
+.B fuzz
+Trace a command, then re-execute the resulting program repeatedly.
+.TP
+.B selftest
+Build a suitable kernel and exercise each mode. Requires a kernel source tree
+and \fBvirtme-ng\fR; intended for development rather than installed use.
+.SH FILES
+.TP
+.I /usr/lib/vock/kcov.so
+The LD_PRELOAD coverage shim. Override its location with
+.BR VOCK_KCOV_SO .
+.TP
+.I kerncov.log
+Kernel program counters from the run, written to the current directory.
+.TP
+.I coverage.html
+The generated report.
+.SH ENVIRONMENT
+.TP
+.B VOCK_KCOV_SO
+Path to the coverage shim, overriding the built-in search.
+.TP
+.B VOCK_PROG_INT_WIDTH
+Width in bytes assumed for an integer inside a compound argument when
+replaying a syzkaller program. Default 8.
+.SH EXIT STATUS
+Returns the traced command's exit status, or 1 on setup failure.
+.SH NOTES
+.B \-\-mode
+.B kcov
+requires root and a kernel with
+.BR CONFIG_KCOV .
+.B \-\-mode
+.B hw
+requires
+.I /proc/sys/kernel/perf_event_paranoid
+to be 1 or less, or root.
+.SH SEE ALSO
+.BR perf (1),
+.BR strace (1),
+.BR addr2line (1)
+.SH AUTHOR
+Yunseong Kim <yunseong.kim@est.tech>
