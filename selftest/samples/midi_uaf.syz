@@ -1,0 +1,34 @@
+# Reproducer — KASAN: slab-use-after-free Write in snd_usb_midi_v2_free
+#
+# syzbot bug:   https://syzkaller.appspot.com/bug?extid=565b1138cfbe549d4422
+# subsystem:    sound / USB MIDI 2.0 (UMP)   sound/usb/midi2.c
+#
+# Root cause (teardown ordering): a USB MIDI 2.0 device whose MIDIStreaming
+# altsetting advertises a MIDI-2.0 class endpoint makes snd_usb_midi_v2_create()
+# reach create_midi2_ump() -> snd_ump_endpoint_new() and register a UMP rawmidi.
+# On USB disconnect the card is freed: snd_device_free_all() -> snd_rawmidi_free()
+# frees the snd_ump_endpoint object first, then snd_usb_midi_v2_free() ->
+# free_all_midi2_umps() writes rmidi->ump->private_data = NULL into that freed
+# object (sound/usb/midi2.c:689) => slab-use-after-free Write.
+#
+# So any enumerate -> disconnect of a valid MIDI-2.0 UMP device drives the bug;
+# the connect blob below is a hand-built minimal MIDI 2.0 descriptor.
+#
+# vock reproducer format (see crates/vock/src/fuzz/pseudo_syscalls.rs):
+#   syz_usb_connect(speed, <hex device+config descriptor blob>)
+# drives /dev/raw-gadget + dummy_hcd from userspace; disconnect = close(fd).
+#
+# Descriptor blob layout (device 18B + config 64B = 82B):
+#   device desc                bDeviceClass=0, 1 config
+#   config desc                wTotalLength=0x40, 2 interfaces
+#   iface0 alt0  AudioControl  class 1 / subclass 1, 0 eps
+#   CS-AC header               bcdADC 1.00, collection -> iface 1
+#   iface1 alt0  MIDIStreaming class 1 / subclass 3, 0 eps   (MIDI 1.0 fallback)
+#   iface1 alt1  MIDIStreaming class 1 / subclass 3, 1 ep    (num_altsetting>=2)
+#   CS-MS header               bcdMSC=0x0200  => is_midi2_altset() == true
+#   endpoint  0x81 bulk IN     wMaxPacketSize 64
+#   CS-MS EP (GENERAL_2_0)     bNumGrpTrmBlock=1, GTB id 1 => create_midi2_ump()
+
+r0 = syz_usb_connect(0x3, 12010002000000406b1da0a400010000000109024000020100803209040000000101000009240100010900010109040100000103000009040101010103000007240100020c00070581024000000525020101)
+syz_usb_control_io(r0)
+syz_usb_disconnect(r0)

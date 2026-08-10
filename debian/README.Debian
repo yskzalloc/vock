@@ -1,0 +1,27 @@
+vock for Debian
+===============
+
+Privileges
+----------
+
+  * --mode kcov requires root and a kernel built with CONFIG_KCOV. Debian's
+    stock kernels do not enable it, so this mode needs a self-built kernel.
+  * --mode hw (Intel PT / AMD LBR / CoreSight) needs
+    /proc/sys/kernel/perf_event_paranoid set to 1 or less, or root.
+
+The coverage shim
+-----------------
+
+vock loads /usr/lib/vock/kcov.so into the traced process with LD_PRELOAD. It
+is a private helper, not a public library: it has no SONAME and no stable ABI,
+so it is not in the linker search path. Override its location with
+VOCK_KCOV_SO if you need to.
+
+selftest
+--------
+
+"vock selftest" builds kernels with virtme-ng and shells out to make, so it
+expects a source tree and a build toolchain. It is a development aid and is
+not expected to work from the installed package.
+
+ -- Yunseong Kim <yunseong.kim@est.tech>

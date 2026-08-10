@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "vock",
+    "kcov-preload",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[profile.release]
+opt-level = 2
+panic = "unwind"

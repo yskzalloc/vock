@@ -1,15 +1,47 @@
+# ─── Rust / Cargo build ──────────────────────────────────────────────
+/target
+target/
+debug/
+**/*.rs.bk
+*.pdb
+**/mutants.out*/
+rustc-ice-*.txt
+
+# ─── vock build artifacts ────────────────────────────────────────────
 *.o
 *.so
-vock
-vmlinux.h
-hw_trace.bin
-*.syz
-__pycache__/
+mode/*.so
+# The `vock` crate directory lives at the repo root, so the built binary is
+# copied to ./vock.bin rather than ./vock (see the Makefile).
+/vock.bin
 
-# Generated eBPF artifacts
+# ─── coverage / trace outputs ────────────────────────────────────────
+*.log
+*.syz
+!selftest/samples/*.syz
+*.html
+coverage.txt
+kerncov.log
+kerncov_prog*
+local-*.log
+remote-*.log
+remote_coverage.log
+
+# ─── test data ───────────────────────────────────────────────────────
+secure_block*
+key.bin
+
+# ─── generated eBPF / SUD artifacts ──────────────────────────────────
 syscall/ebpf/vmlinux.h
 syscall/ebpf/trace.bpf.o
 syscall/ebpf/trace.skel.h
-*.html
-*.log
-*.txt
+
+# ─── Debian packaging build artifacts ────────────────────────────────────
+/debian/vendor/
+/debian/cargo_home/
+/debian/vock/
+/debian/.debhelper/
+/debian/files
+/debian/*.substvars
+/debian/*.log
+/debian/debhelper-build-stamp

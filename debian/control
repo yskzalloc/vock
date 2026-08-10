@@ -1,0 +1,42 @@
+Source: vock
+Section: devel
+Priority: optional
+Maintainer: Yunseong Kim <yunseong.kim@est.tech>
+Build-Depends:
+ debhelper-compat (= 13),
+ cargo,
+ rustc (>= 1.70),
+ dpkg-dev (>= 1.22),
+Standards-Version: 4.7.2
+Homepage: https://github.com/yskzalloc/vock
+Vcs-Browser: https://github.com/yskzalloc/vock
+Vcs-Git: https://github.com/yskzalloc/vock.git
+Rules-Requires-Root: no
+
+Package: vock
+Architecture: amd64 arm64
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends},
+Recommends:
+ binutils,
+Suggests:
+ linux-image-amd64,
+ virtme-ng,
+ kcapi-tools,
+Description: map a userspace program to the kernel code it exercises
+ vock runs a command and reports exactly which kernel source lines that
+ command caused to execute, as an annotated HTML or terminal report.
+ .
+ Coverage is collected either from KCOV (per-thread, via an LD_PRELOAD shim
+ that follows fork, vfork and pthread_create) or from a hardware trace unit
+ with no kernel instrumentation required: Intel Processor Trace and AMD LBR
+ on x86-64, CoreSight ETM on arm64.
+ .
+ Syscalls made by the target can be traced through any of three backends
+ (ptrace, SYSCALL_USER_DISPATCH, or eBPF) and emitted either in strace format
+ or as a syzkaller program. vock can also replay a syzkaller program,
+ including an unmodified syzbot reproducer, and collect per-call coverage
+ for it.
+ .
+ Reports resolve addresses through DWARF, BTF or kallsyms, and handle KASLR.
