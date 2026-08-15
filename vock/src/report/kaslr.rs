@@ -29,6 +29,38 @@ fn parse_hex(a: &str) -> u64 {
     u64::from_str_radix(s, 16).unwrap_or(0)
 }
 
+/// `_stext` of the *running* kernel from /proc/kallsyms, when readable and
+/// not hidden by kptr_restrict.
+fn kallsyms_stext() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/kallsyms").ok()?;
+    for l in s.lines() {
+        let mut it = l.split_whitespace();
+        let (Some(addr), Some(t), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if name == "_stext" && t.eq_ignore_ascii_case("t") {
+            return u64::from_str_radix(addr, 16).ok().filter(|&v| v != 0);
+        }
+    }
+    None
+}
+
+/// A named text symbol out of the vmlinux symbol table.
+fn vmlinux_sym(vmlinux: &str, want: &str) -> Option<u64> {
+    let nm = Command::new("nm").arg(vmlinux).output().ok()?;
+    let s = String::from_utf8_lossy(&nm.stdout);
+    for l in s.lines() {
+        let mut it = l.split_whitespace();
+        let (Some(addr), Some(t), Some(name)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        if name == want && t.eq_ignore_ascii_case("t") {
+            return u64::from_str_radix(addr, 16).ok();
+        }
+    }
+    None
+}
+
 pub fn detect_offset(vmlinux: &str, addrs: &[String]) -> u64 {
     if addrs.is_empty() {
         return 0;
@@ -50,6 +82,23 @@ pub fn detect_offset(vmlinux: &str, addrs: &[String]) -> u64 {
     let resolved: Vec<&str> = out.lines().filter(|l| !l.is_empty() && !l.contains("??")).collect();
     if !resolved.is_empty() {
         return 0;
+    }
+
+    // Exact method: offset = running kernel _stext (kallsyms) minus the
+    // vmlinux _stext. Valid whenever the log was collected on the running
+    // kernel, which is vock's normal in-process report flow. The heuristic
+    // below cannot be exact: it rounds the sample-to-vmlinux delta to an
+    // alignment, and its addr2line probe cannot reject a wrong guess — any
+    // address that still lands inside the text range resolves to *some*
+    // plausible file, silently attributing coverage to unrelated code.
+    if let (Some(run), Some(vml)) = (kallsyms_stext(), vmlinux_sym(vmlinux, "_stext")) {
+        let off = run.wrapping_sub(vml);
+        // x86 KASLR randomizes the virtual base with 2 MiB granularity; an
+        // unaligned diff means the kallsyms/vmlinux pair do not belong
+        // together (e.g. resolving a foreign log), so fall through.
+        if off & 0x1f_ffff == 0 && (off >> 21) < (1 << 20) {
+            return off;
+        }
     }
 
     // Find vmlinux _text / _stext via nm.
@@ -82,7 +131,7 @@ pub fn detect_offset(vmlinux: &str, addrs: &[String]) -> u64 {
     let median = code_addrs[code_addrs.len() / 2];
     let diff = median.wrapping_sub(text_addr);
 
-    for shift in [24u32, 21u32] {
+    for shift in [21u32, 24u32] {
         let offset = (diff >> shift) << shift;
         if offset > 0 {
             let test = format!("0x{:x}", median - offset);

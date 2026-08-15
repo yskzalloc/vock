@@ -218,7 +218,32 @@ pub fn run(opts: &Options) -> i32 {
     let addrs = kaslr::dekaslr(&addrs, offset);
 
     let lines = resolve::run_addr2line(&vmlinux, &addrs);
-    let cov = resolve::aggregate(&lines, &kernel_src);
+
+    // Split assembly-resolved PCs out of the source report: the annotated C
+    // source is what the report is for, and entry stubs (entry_64.S,
+    // retpoline.S, ...) drown it out. They are preserved, not dropped -
+    // asmcov.log carries one "0x<pc> <file>:<line>" per assembly PC.
+    let mut asm_out = String::new();
+    let mut asm_count = 0usize;
+    let mut src_lines: Vec<String> = Vec::with_capacity(lines.len());
+    for (a, l) in addrs.iter().zip(lines.iter()) {
+        let file = l.rsplit_once(':').map(|(f, _)| f).unwrap_or(l.as_str());
+        if file.ends_with(".S") || file.ends_with(".s") {
+            asm_out.push_str(&format!("{a} {l}
+"));
+            asm_count += 1;
+        } else {
+            src_lines.push(l.clone());
+        }
+    }
+    if asm_count > 0 {
+        let _ = std::fs::write("asmcov.log", &asm_out);
+        if !opts.quiet {
+            println!("  {asm_count} assembly PCs split out to asmcov.log");
+        }
+    }
+
+    let cov = resolve::aggregate(&src_lines, &kernel_src);
     if cov.is_empty() {
         if !opts.quiet {
             println!("\x1b[93mno source lines resolved\x1b[0m");

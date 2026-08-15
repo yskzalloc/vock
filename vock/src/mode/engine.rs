@@ -41,6 +41,7 @@ const PERF_RECORD_SAMPLE: u32 = 9;
 // perf_event_attr bitfield flags (within the single `flags` u64 word).
 const ATTR_DISABLED: u64 = 1 << 0;
 const ATTR_EXCLUDE_USER: u64 = 1 << 4;
+const ATTR_FREQ: u64 = 1 << 10; // sample_period_or_freq is a frequency (Hz)
 // exclude_kernel would be `1 << 5` — kept 0 to trace the kernel.
 
 // Byte offsets into perf_event_mmap_page (stable kernel ABI; the control
@@ -131,6 +132,13 @@ unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t) -> i32 {
     ) as i32
 }
 
+/// Dynamic PMU type from sysfs (e.g. ibs_op), None when the PMU is absent —
+/// notably inside KVM guests, which virtualize neither IBS nor branch stacks.
+fn pmu_type(name: &str) -> Option<u32> {
+    let s = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{name}/type")).ok()?;
+    parse_leading_int(&s).map(|v| v as u32)
+}
+
 // ─── Session ─────────────────────────────────────────────────────────────────
 
 /// An armed hardware-trace session over a target pid (owns the perf fd and the
@@ -143,6 +151,12 @@ pub struct Session {
     aux_buf: *mut libc::c_void,
     aux_size: usize,
     amd_lbr: bool,
+    // Second concurrent AMD event: IBS op precise sampling running alongside
+    // the LBR event. Both rings are decoded and merged - IBS contributes
+    // skid-0 retired-op rips, LBR contributes 16-branch breadth per PMI.
+    ibs_fd: i32,
+    ibs_base: *mut libc::c_void,
+    ibs_size: usize,
 }
 
 impl Session {
@@ -246,27 +260,57 @@ impl Session {
             aux_buf,
             aux_size: AUX_SIZE,
             amd_lbr: false,
+            ibs_fd: -1,
+            ibs_base: libc::MAP_FAILED,
+            ibs_size: 0,
         })
     }
 
-    /// Port of amd_lbr_start().
+    /// AMD sampling engine: two concurrent perf events, merged at decode.
+    ///
+    /// * LBR branch stacks (cycles clock, 10 kHz): 16 taken branches per
+    ///   PMI - the breadth. A tight period is degenerate here (the counter
+    ///   re-arms instantly, or unthrottles on the tick, and every snapshot
+    ///   captures the same 16-branch PMI entry window); frequency mode
+    ///   spreads snapshots across the target's real kernel work.
+    /// * IBS op (`ibs_op` PMU, 10 kHz): precise instruction-based sampling.
+    ///   The rip of IBS samples has skid 0 (arch/x86/events/amd/ibs.c), each
+    ///   sample is a retired op, and the hardware randomizes the sample
+    ///   interval, decorrelating it from the LBR PMI clock.
+    ///
+    /// Alone, IBS yields ~1 PC per sample vs LBR's ~32 (measured: 21 vs ~500
+    /// unique PCs on the same run), so it complements rather than replaces
+    /// LBR. Guests get neither (KVM virtualizes neither facility) and fall
+    /// back to plain IP sampling.
     fn amd_lbr_start(pid: libc::pid_t) -> Option<Session> {
-        // Primary: LBR branch-stack sampling.
-        let attr = PerfEventAttr {
+        let lbr_attr = PerfEventAttr {
             size: std::mem::size_of::<PerfEventAttr>() as u32,
             type_: PERF_TYPE_HARDWARE,
-            config: PERF_COUNT_HW_BRANCH_INSTRUCTIONS,
-            flags: ATTR_DISABLED | ATTR_EXCLUDE_USER,
-            sample_period_or_freq: 1,
+            config: PERF_COUNT_HW_CPU_CYCLES,
+            flags: ATTR_DISABLED | ATTR_EXCLUDE_USER | ATTR_FREQ,
+            sample_period_or_freq: 10_000, // Hz; clear of the PMI throttle
             sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_BRANCH_STACK,
             branch_sample_type: PERF_SAMPLE_BRANCH_KERNEL | PERF_SAMPLE_BRANCH_ANY,
             wakeup: 1,
             ..Default::default()
         };
 
-        let mut perf_fd = unsafe { perf_event_open(&attr, pid) };
+        let mut perf_fd = unsafe { perf_event_open(&lbr_attr, pid) };
         if perf_fd < 0 {
-            // Fallback: IP-only cycle sampling (older kernels without LBR).
+            // Fallback: IP-only cycle sampling. Reached on kernels without
+            // LBR and notably inside KVM guests, where AMD branch stacks
+            // (BRS / LbrExtV2) are not virtualized. Statistical IP samples
+            // are sparse and biased toward interrupt/exception entry code,
+            // so say so instead of quietly producing a misleading report.
+            eprintln!(
+                "amd_lbr: branch-stack sampling unavailable ({}); falling back to \
+IP sampling every 4000 kernel cycles",
+                std::io::Error::last_os_error()
+            );
+            eprintln!(
+                "amd_lbr: expect sparse, interrupt-biased coverage - KVM guests do not \
+virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for real LBR"
+            );
             let attr = PerfEventAttr {
                 size: std::mem::size_of::<PerfEventAttr>() as u32,
                 type_: PERF_TYPE_HARDWARE,
@@ -288,23 +332,54 @@ impl Session {
         }
 
         let mmap_size = (AMD_MMAP_PAGES + 1) * 4096;
-        let base = unsafe {
-            libc::mmap(
-                ptr::null_mut(),
-                mmap_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED,
-                perf_fd,
-                0,
-            )
+        let base = match Self::map_ring(perf_fd, mmap_size) {
+            Some(b) => b,
+            None => {
+                unsafe { libc::close(perf_fd) };
+                return None;
+            }
         };
-        if base == libc::MAP_FAILED {
-            eprintln!("amd_lbr: mmap: {}", std::io::Error::last_os_error());
-            unsafe { libc::close(perf_fd) };
-            return None;
+
+        // Secondary: IBS op, when the PMU exists (bare metal only).
+        // exclude_user is filtered in the IBS IRQ handler on recent kernels
+        // and rejected with EINVAL on older ones - retry without it; the
+        // decoder keeps only kernel addresses anyway.
+        let mut ibs_fd = -1;
+        let mut ibs_base = libc::MAP_FAILED;
+        if let Some(t) = pmu_type("ibs_op") {
+            for flags in [
+                ATTR_DISABLED | ATTR_FREQ | ATTR_EXCLUDE_USER,
+                ATTR_DISABLED | ATTR_FREQ,
+            ] {
+                let attr = PerfEventAttr {
+                    size: std::mem::size_of::<PerfEventAttr>() as u32,
+                    type_: t,
+                    config: 0,
+                    flags,
+                    sample_period_or_freq: 10_000, // Hz
+                    sample_type: PERF_SAMPLE_IP,
+                    wakeup: 1,
+                    ..Default::default()
+                };
+                let fd = unsafe { perf_event_open(&attr, pid) };
+                if fd >= 0 {
+                    if let Some(b) = Self::map_ring(fd, mmap_size) {
+                        eprintln!("amd hw: + IBS op precise sampling (skid 0, retired ops)");
+                        ibs_fd = fd;
+                        ibs_base = b;
+                        break;
+                    }
+                    unsafe { libc::close(fd) };
+                }
+            }
         }
 
-        unsafe { libc::ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0) };
+        unsafe {
+            libc::ioctl(perf_fd, PERF_EVENT_IOC_ENABLE, 0);
+            if ibs_fd >= 0 {
+                libc::ioctl(ibs_fd, PERF_EVENT_IOC_ENABLE, 0);
+            }
+        }
 
         Some(Session {
             perf_fd,
@@ -314,13 +389,38 @@ impl Session {
             aux_buf: libc::MAP_FAILED,
             aux_size: 0,
             amd_lbr: true,
+            ibs_fd,
+            ibs_base,
+            ibs_size: mmap_size,
         })
+    }
+
+    /// mmap a perf sample ring (consumer page + data pages).
+    fn map_ring(fd: i32, mmap_size: usize) -> Option<*mut libc::c_void> {
+        let base = unsafe {
+            libc::mmap(
+                ptr::null_mut(),
+                mmap_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            )
+        };
+        if base == libc::MAP_FAILED {
+            eprintln!("amd hw: mmap: {}", std::io::Error::last_os_error());
+            return None;
+        }
+        Some(base)
     }
 
     /// Port of vock_hw_trace_stop().
     pub fn stop(&mut self) {
         if self.perf_fd >= 0 {
             unsafe { libc::ioctl(self.perf_fd, PERF_EVENT_IOC_DISABLE, 0) };
+        }
+        if self.ibs_fd >= 0 {
+            unsafe { libc::ioctl(self.ibs_fd, PERF_EVENT_IOC_DISABLE, 0) };
         }
     }
 
@@ -339,13 +439,33 @@ impl Session {
 
     /// Port of amd_lbr_decode().
     fn amd_lbr_decode(&mut self) {
-        let head = unsafe { read_u64(self.base, OFF_DATA_HEAD) };
-        let mut tail = unsafe { read_u64(self.base, OFF_DATA_TAIL) };
-        let data_size = (self.mmap_size - 4096) as u64;
-        let ring = unsafe { (self.base as *const u8).add(4096) };
-
         let mut out = String::new();
         let mut pc_count: i32 = 0;
+
+        Self::drain_sample_ring(self.base, self.mmap_size, &mut out, &mut pc_count);
+        if self.ibs_base != libc::MAP_FAILED {
+            Self::drain_sample_ring(self.ibs_base, self.ibs_size, &mut out, &mut pc_count);
+        }
+
+        if let Ok(mut f) = std::fs::File::create("kerncov.log") {
+            let _ = f.write_all(out.as_bytes());
+        }
+        eprintln!("[vock] AMD hw: {} kernel PCs sampled", pc_count);
+    }
+
+    /// Drain one perf sample ring: PERF_RECORD_SAMPLE ip (+ optional branch
+    /// stack) records, kernel addresses only. Shared by the LBR/IP ring and
+    /// the IBS ring.
+    fn drain_sample_ring(
+        base: *mut libc::c_void,
+        mmap_size: usize,
+        out: &mut String,
+        pc_count: &mut i32,
+    ) {
+        let head = unsafe { read_u64(base, OFF_DATA_HEAD) };
+        let mut tail = unsafe { read_u64(base, OFF_DATA_TAIL) };
+        let data_size = (mmap_size - 4096) as u64;
+        let ring = unsafe { (base as *const u8).add(4096) };
 
         while tail < head {
             let ev = unsafe { ring.add((tail % data_size) as usize) };
@@ -360,7 +480,7 @@ impl Session {
 
                 if ip >= 0xffff_8000_0000_0000 {
                     out.push_str(&format!("0x{:x}\n", ip));
-                    pc_count += 1;
+                    *pc_count += 1;
                 }
 
                 // Branch stack present when the record is larger than IP+nr.
@@ -374,11 +494,11 @@ impl Session {
                         p = unsafe { p.add(24) };
                         if from >= 0xffff_8000_0000_0000 {
                             out.push_str(&format!("0x{:x}\n", from));
-                            pc_count += 1;
+                            *pc_count += 1;
                         }
                         if to >= 0xffff_8000_0000_0000 {
                             out.push_str(&format!("0x{:x}\n", to));
-                            pc_count += 1;
+                            *pc_count += 1;
                         }
                         i += 1;
                     }
@@ -387,12 +507,7 @@ impl Session {
             tail += ev_size;
         }
 
-        unsafe { write_u64(self.base, OFF_DATA_TAIL, head) };
-
-        if let Ok(mut f) = std::fs::File::create("kerncov.log") {
-            let _ = f.write_all(out.as_bytes());
-        }
-        eprintln!("[vock] AMD hw: {} kernel PCs sampled", pc_count);
+        unsafe { write_u64(base, OFF_DATA_TAIL, head) };
     }
 
     /// Port of intel_pt_decode().
@@ -459,6 +574,12 @@ impl Drop for Session {
             }
             if self.perf_fd >= 0 {
                 libc::close(self.perf_fd);
+            }
+            if self.ibs_base != libc::MAP_FAILED {
+                libc::munmap(self.ibs_base, self.ibs_size);
+            }
+            if self.ibs_fd >= 0 {
+                libc::close(self.ibs_fd);
             }
         }
     }

@@ -618,7 +618,15 @@ impl Harness {
                 self.log("SKIP", &format!("hw+{backend}{tag}: perf unavailable (nested VM or insufficient privileges)"));
             } else if let Some(pcs) = field(&out, "KCOV_PCS=") {
                 if pcs.parse::<i64>().unwrap_or(0) > 0 {
-                    self.log("PASS", &format!("hw+{backend}+vmlinux{tag}: {pcs} PCs"));
+                    // Guests cannot virtualize AMD branch stacks; when the
+                    // engine fell back to IP sampling, say so in the verdict
+                    // instead of letting the pass read as real LBR.
+                    let how = if out.contains("branch-stack sampling unavailable") {
+                        " [IP-sampling fallback]"
+                    } else {
+                        ""
+                    };
+                    self.log("PASS", &format!("hw+{backend}+vmlinux{tag}: {pcs} PCs{how}"));
                 } else if out.contains("0 kernel PCs sampled") {
                     self.log("SKIP", &format!("hw+{backend}+vmlinux{tag}: 0 PCs (LBR not available in nested VM)"));
                 } else {
