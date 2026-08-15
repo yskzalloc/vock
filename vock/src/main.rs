@@ -66,7 +66,8 @@ options:
   --kernel-src PATH   kernel source for coverage report
   --vmlinux FILE      vmlinux with debug info (enables full branch coverage)
   --btf               resolve PCs via /proc/kallsyms (no vmlinux needed)
-  --ordered           per-TID sequential output (coverage-<TID>.html)
+  --ordered           sequential output: kcov per-TID coverage-<TID>.html,
+                      hw a single time-ordered coverage.html
   --filter KW         filter coverage report to matching paths
   -A N, -B N          context lines in coverage report
 
@@ -472,6 +473,7 @@ fn real_main() -> i32 {
             btf,
             ctx_after,
             ctx_before,
+            ordered,
         ),
     };
 

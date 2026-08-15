@@ -18,6 +18,7 @@ pub fn available() -> bool {
     engine::available()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     cmd: &[String],
     vmlinux: Option<&str>,
@@ -26,6 +27,7 @@ pub fn run(
     btf: bool,
     ctx_after: i32,
     ctx_before: i32,
+    ordered: bool,
 ) -> i32 {
     // Fork the target, stopped on a pipe until tracing is armed.
     let mut pipefd = [0i32; 2];
@@ -77,7 +79,11 @@ pub fn run(
     session.decode(vmlinux);
     drop(session);
 
-    // Generate report from kerncov.log.
+    // Generate report from kerncov.log. The AMD decoder emits the log in
+    // timestamp order with duplicates preserved, so with --ordered the
+    // report renders the execution sequence as-is (Intel PT trace output is
+    // inherently ordered too); without it the normal deduplicated
+    // source-annotated report is produced.
     let opts = report::Options {
         kernel_src: kernel_src.map(String::from),
         vmlinux: vmlinux.map(String::from),
@@ -88,7 +94,7 @@ pub fn run(
         ctx_before: if ctx_before >= 0 { ctx_before } else { 4 },
         output: "coverage.html".to_string(),
         btf,
-        ordered: false,
+        ordered,
     };
     report::run(&opts);
 

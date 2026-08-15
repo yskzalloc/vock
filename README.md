@@ -242,7 +242,7 @@ CONFIG_CRYPTO_USER_API_SKCIPHER=y
 | Mode | Flag | Coverage Level | Kernel Requirement |
 |------|------|---------------|-------------------|
 | Intel PT | `--mode hw` (default) | Branch (with vmlinux) or function-entry | `CONFIG_PERF_EVENTS=y` |
-| AMD LBR + IBS | `--mode hw` (auto) | Branch + precise-op samples, merged (bare metal); IP samples in VMs | `CONFIG_PERF_EVENTS=y` |
+| AMD LBR + IBS | `--mode hw` (auto) | Branch + precise-op samples, timestamp-merged (bare metal); IP samples in VMs. `--ordered` renders the sequence | `CONFIG_PERF_EVENTS=y` |
 | CoreSight | `--mode hw` (auto) | Function-entry | `CONFIG_PERF_EVENTS=y`, `CONFIG_CORESIGHT=y` |
 | KCOV | `--mode kcov` | Branch (per-task + remote) | `CONFIG_KCOV=y`, `CONFIG_KCOV_INSTRUMENT_ALL=y` |
 
@@ -436,7 +436,7 @@ file capabilities.
 | `kerncov_prog1.extra` | Background coverage belonging to no single call |
 | `coverage.html` | Source-annotated coverage report (C source only) |
 | `asmcov.log` | PCs that resolved to assembly (`.S`), split out of the report |
-| `coverage-<TID>.html` | Per-thread report from `--ordered` |
+| `coverage-<TID>.html` | Per-thread ordered trace from `--mode kcov --ordered` |
 | `trace.log` | Strace-format syscall log |
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
 

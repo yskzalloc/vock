@@ -31,6 +31,7 @@ const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
 const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
 
 const PERF_SAMPLE_IP: u64 = 1 << 0;
+const PERF_SAMPLE_TIME: u64 = 1 << 2;
 const PERF_SAMPLE_BRANCH_STACK: u64 = 1 << 11;
 
 const PERF_SAMPLE_BRANCH_KERNEL: u64 = 1 << 1;
@@ -289,7 +290,7 @@ impl Session {
             config: PERF_COUNT_HW_CPU_CYCLES,
             flags: ATTR_DISABLED | ATTR_EXCLUDE_USER | ATTR_FREQ,
             sample_period_or_freq: 10_000, // Hz; clear of the PMI throttle
-            sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_BRANCH_STACK,
+            sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK,
             branch_sample_type: PERF_SAMPLE_BRANCH_KERNEL | PERF_SAMPLE_BRANCH_ANY,
             wakeup: 1,
             ..Default::default()
@@ -317,7 +318,7 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
                 config: PERF_COUNT_HW_CPU_CYCLES,
                 flags: ATTR_DISABLED | ATTR_EXCLUDE_USER,
                 sample_period_or_freq: 4000,
-                sample_type: PERF_SAMPLE_IP,
+                sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME,
                 wakeup: 1,
                 ..Default::default()
             };
@@ -357,7 +358,7 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
                     config: 0,
                     flags,
                     sample_period_or_freq: 10_000, // Hz
-                    sample_type: PERF_SAMPLE_IP,
+                    sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME,
                     wakeup: 1,
                     ..Default::default()
                 };
@@ -439,12 +440,27 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
 
     /// Port of amd_lbr_decode().
     fn amd_lbr_decode(&mut self) {
+        // Chronological merge: both events sample PERF_SAMPLE_TIME, so the
+        // LBR/IP stream and the IBS stream interleave by timestamp instead
+        // of being concatenated. Within one LBR sample perf orders the
+        // branch entries newest-first; they are reversed here so the log
+        // reads oldest-to-newest. kerncov.log is therefore a true execution
+        // sequence (duplicates preserved) - the normal report dedups it,
+        // and --ordered renders it as-is.
+        let mut samples: Vec<(u64, Vec<u64>)> = Vec::new();
+        Self::drain_sample_ring(self.base, self.mmap_size, &mut samples);
+        if self.ibs_base != libc::MAP_FAILED {
+            Self::drain_sample_ring(self.ibs_base, self.ibs_size, &mut samples);
+        }
+        samples.sort_by_key(|(t, _)| *t);
+
         let mut out = String::new();
         let mut pc_count: i32 = 0;
-
-        Self::drain_sample_ring(self.base, self.mmap_size, &mut out, &mut pc_count);
-        if self.ibs_base != libc::MAP_FAILED {
-            Self::drain_sample_ring(self.ibs_base, self.ibs_size, &mut out, &mut pc_count);
+        for (_, pcs) in &samples {
+            for pc in pcs {
+                out.push_str(&format!("0x{:x}\n", pc));
+                pc_count += 1;
+            }
         }
 
         if let Ok(mut f) = std::fs::File::create("kerncov.log") {
@@ -453,14 +469,14 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
         eprintln!("[vock] AMD hw: {} kernel PCs sampled", pc_count);
     }
 
-    /// Drain one perf sample ring: PERF_RECORD_SAMPLE ip (+ optional branch
-    /// stack) records, kernel addresses only. Shared by the LBR/IP ring and
-    /// the IBS ring.
+    /// Drain one perf sample ring into timestamped samples. Record layout
+    /// (sample_type = IP | TIME [| BRANCH_STACK]): header, ip, time, then
+    /// optionally nr + nr x {from, to, flags}. Kernel addresses only; branch
+    /// entries are reversed to oldest-first (perf returns them newest-first).
     fn drain_sample_ring(
         base: *mut libc::c_void,
         mmap_size: usize,
-        out: &mut String,
-        pc_count: &mut i32,
+        samples: &mut Vec<(u64, Vec<u64>)>,
     ) {
         let head = unsafe { read_u64(base, OFF_DATA_HEAD) };
         let mut tail = unsafe { read_u64(base, OFF_DATA_TAIL) };
@@ -473,35 +489,42 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
             let ev_type = unsafe { (ev as *const u32).read_unaligned() };
             let ev_size = unsafe { (ev.add(6) as *const u16).read_unaligned() } as u64;
 
-            if ev_type == PERF_RECORD_SAMPLE && ev_size > 8 {
+            if ev_type == PERF_RECORD_SAMPLE && ev_size >= 8 + 8 + 8 {
                 let mut p = unsafe { ev.add(8) };
                 let ip = unsafe { (p as *const u64).read_unaligned() };
                 p = unsafe { p.add(8) };
+                let time = unsafe { (p as *const u64).read_unaligned() };
+                p = unsafe { p.add(8) };
 
-                if ip >= 0xffff_8000_0000_0000 {
-                    out.push_str(&format!("0x{:x}\n", ip));
-                    *pc_count += 1;
-                }
+                let mut pcs: Vec<u64> = Vec::new();
 
-                // Branch stack present when the record is larger than IP+nr.
-                if ev_size > 8 + 8 + 8 {
+                // Branch stack present when the record extends past ip+time+nr.
+                if ev_size > 8 + 8 + 8 + 8 {
                     let nr = unsafe { (p as *const u64).read_unaligned() };
                     p = unsafe { p.add(8) };
-                    let mut i: u64 = 0;
-                    while i < nr && i < 32 {
+                    let n = nr.min(32) as usize;
+                    let mut branches: Vec<(u64, u64)> = Vec::with_capacity(n);
+                    for _ in 0..n {
                         let from = unsafe { (p as *const u64).read_unaligned() };
                         let to = unsafe { (p.add(8) as *const u64).read_unaligned() };
                         p = unsafe { p.add(24) };
+                        branches.push((from, to));
+                    }
+                    for (from, to) in branches.into_iter().rev() {
                         if from >= 0xffff_8000_0000_0000 {
-                            out.push_str(&format!("0x{:x}\n", from));
-                            *pc_count += 1;
+                            pcs.push(from);
                         }
                         if to >= 0xffff_8000_0000_0000 {
-                            out.push_str(&format!("0x{:x}\n", to));
-                            *pc_count += 1;
+                            pcs.push(to);
                         }
-                        i += 1;
                     }
+                }
+                // The sampled ip itself is the newest point in the record.
+                if ip >= 0xffff_8000_0000_0000 {
+                    pcs.push(ip);
+                }
+                if !pcs.is_empty() {
+                    samples.push((time, pcs));
                 }
             }
             tail += ev_size;

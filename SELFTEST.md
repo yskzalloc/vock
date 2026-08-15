@@ -82,9 +82,15 @@ features across three groups.
 ### Group C: remaining reporting features
 
 ```
---mode kcov --ordered --vmlinux    → coverage-<TID>.html (per-TID execution trace)
---mode kcov --filter fs --vmlinux  → coverage.html narrowed to fs/ paths
+--mode kcov --ordered --vmlinux  /bin/sh -c 'ls; ls'  → coverage-<TID>.html per task
+--mode kcov --filter fs --vmlinux                     → coverage.html narrowed to fs/ paths
 ```
+
+The `--ordered` run uses a **forking target** and asserts the sequence
+semantics, not just file existence: at least two per-TID reports (the
+fan-out is real), duplicate PCs preserved (no dedup), the log in
+chronological KCOV-buffer order (not sorted), and the per-TID HTML being
+the ordered execution-trace table.
 
 Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0, HTML
 report, per-TID ordered report, and keyword filtering. `sud` traces up to the
@@ -145,6 +151,12 @@ For each backend it runs:
 --mode hw --syzlang --syscall sud --vmlinux     → kerncov.log + trace.log + trace.syz
 --mode hw --syzlang --syscall ebpf --vmlinux    → kerncov.log + trace.log + trace.syz
 ```
+
+Each side then runs an `--mode hw --ordered` sequence check: the AMD
+decoder merges the LBR and IBS sample streams by `PERF_SAMPLE_TIME` and
+reverses each LBR snapshot to oldest-first, so `kerncov.log` is a true
+execution sequence. The check asserts duplicates preserved, chronological
+(unsorted) order, and that `coverage.html` is the ordered trace table.
 
 Skips automatically when:
 - Intel PT + `--on vng-kvm` (Intel PT is unavailable in KVM guests)

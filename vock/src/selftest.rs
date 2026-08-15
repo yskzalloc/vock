@@ -267,6 +267,41 @@ impl Harness {
         }
     }
 
+    /// Print up to `n` sample lines of a run artifact (files land in the
+    /// kernel tree, which vng shares with the host), so a PASS comes with
+    /// the actual data a human would check, not just the verdict.
+    fn sample(&self, name: &str, n: usize) {
+        let p = Path::new(&self.kernel_src).join(name);
+        let Ok(s) = std::fs::read_to_string(&p) else { return };
+        let total = s.lines().count();
+        for l in s.lines().take(n) {
+            let t: String = l.chars().take(96).collect();
+            println!("      \u{00b7} {name}: {t}");
+        }
+        if total > n {
+            println!("      \u{00b7} {name}: ... ({total} lines total)");
+        }
+    }
+
+    /// Like [`Self::sample`], for the largest file matching `prefix`/`suffix`
+    /// (e.g. the biggest per-TID ordered log).
+    fn sample_largest(&self, prefix: &str, suffix: &str, n: usize) {
+        let Ok(rd) = std::fs::read_dir(&self.kernel_src) else { return };
+        let mut best: Option<(u64, String)> = None;
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if name.starts_with(prefix) && name.ends_with(suffix) {
+                let sz = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                if best.as_ref().map(|(b, _)| sz > *b).unwrap_or(true) {
+                    best = Some((sz, name));
+                }
+            }
+        }
+        if let Some((_, name)) = best {
+            self.sample(&name, n);
+        }
+    }
+
     fn vlog(&self, r: &Out, force: bool) {
         self.vlog_n(r, force, 20, 10);
     }
@@ -429,19 +464,45 @@ impl Harness {
         // Group C: the remaining KCOV reporting features — ordered per-TID
         // report and a keyword-filtered report.
         println!("\n── Group C: KCOV reporting (--ordered, --filter) ──");
-        println!("\n[Test: --mode kcov --ordered --vmlinux]");
+        println!("\n[Test: --mode kcov --ordered --vmlinux (sequence semantics)]");
+        // A forking target: two /bin/ls children give two traced TIDs, so
+        // the per-TID fan-out is actually exercised. The sequence checks
+        // assert what --ordered exists for: the largest per-TID log keeps
+        // duplicate PCs (no dedup) and is NOT sorted (chronological KCOV
+        // buffer order), and the per-TID HTML is the ordered-trace table.
         let script = format!(
-            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l)"
+            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} /bin/sh -c '/bin/ls /tmp; /bin/ls /tmp' 2>&1 >/dev/null; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l); L=$(ls -S local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then [ $(wc -l < $L) -gt $(sort -u $L | wc -l) ] && echo ORDERED_DUPS_OK; sort $L | cmp -s - $L || echo ORDERED_SEQ_OK; fi; grep -l 'Ordered Kernel Execution Trace' coverage-*.html >/dev/null 2>&1 && echo ORDERED_HTML_OK"
         );
         let r = self.vng_run(&sv(&["bash", "-c", &script]));
         self.vlog(&r, false);
         let out = r.stdout_str();
         if let Some(v) = field(&out, "ORDERED_OK=") {
-            self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html"));
+            if v.parse::<i64>().unwrap_or(0) >= 2 {
+                self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html (forked target)"));
+            } else {
+                self.log("FAIL", &format!("--ordered: only {v} per-TID report from a forking target"));
+                self.vlog(&r, true);
+            }
         } else {
             self.log("FAIL", "--ordered: no per-TID report generated");
             self.vlog(&r, true);
         }
+        if out.contains("ORDERED_DUPS_OK") {
+            self.log("PASS", "--ordered: duplicate PCs preserved (no dedup)");
+        } else {
+            self.log("FAIL", "--ordered: log was deduplicated");
+        }
+        if out.contains("ORDERED_SEQ_OK") {
+            self.log("PASS", "--ordered: log is chronological (not sorted)");
+        } else {
+            self.log("FAIL", "--ordered: log is sorted, not execution order");
+        }
+        if out.contains("ORDERED_HTML_OK") {
+            self.log("PASS", "--ordered: HTML report is the ordered execution trace");
+        } else {
+            self.log("FAIL", "--ordered: HTML report lacks the ordered trace table");
+        }
+        self.sample_largest("local-", ".log", 3);
 
         println!("\n[Test: --mode kcov --filter fs --vmlinux]");
         let script = format!(
@@ -484,14 +545,17 @@ impl Harness {
             self.log("FAIL", &format!("{label}: failed"));
             self.vlog(r, true);
         }
+        self.sample("kerncov.log", 2);
         if let Some(v) = field(&out, "TRACE_OK=") {
             self.log("PASS", &format!("  trace.log: {v} syscalls"));
+            self.sample("trace.log", 2);
         }
         if out.contains("FMT_OK") {
             self.log("PASS", "  strace format verified");
         }
         if let Some(v) = field(&out, "SYZ_OK=") {
             self.log("PASS", &format!("  trace.syz: {v} syscalls"));
+            self.sample("trace.syz", 1);
         }
         if out.contains("HTML_OK") {
             self.log("PASS", "  coverage.html generated");
@@ -573,12 +637,69 @@ impl Harness {
         if hw_type == "AMD LBR" && self.run_target != "host" {
             println!("\n── 2.1: AMD LBR on the host ──");
             self.hw_backend_suite(true, "host");
+            self.hw_ordered_check(true, "host");
             println!("\n── 2.2: AMD LBR in the {} guest ──", self.run_target);
             self.hw_backend_suite(false, "guest");
+            self.hw_ordered_check(false, "guest");
         } else {
-            self.hw_backend_suite(self.run_target == "host", "");
+            let on_host = self.run_target == "host";
+            self.hw_backend_suite(on_host, "");
+            self.hw_ordered_check(on_host, "");
         }
         true
+    }
+
+    /// `--mode hw --ordered`: the AMD decoder emits kerncov.log in timestamp
+    /// order with duplicates preserved (the two sample streams are merged by
+    /// PERF_SAMPLE_TIME), and the report renders it as the ordered execution
+    /// trace table instead of the deduplicated source report.
+    fn hw_ordered_check(&mut self, on_host: bool, side: &str) {
+        let vmlinux = self.vmlinux.clone();
+        let ks = self.kernel_src.clone();
+        let vb = self.vock_bin.clone();
+        let tgt = COVERAGE_TARGET;
+        let tag = if side.is_empty() { String::new() } else { format!(" ({side})") };
+        println!("\n[Test: --mode hw --ordered{tag}]");
+        let script = format!(
+            "rm -f kerncov.log coverage.html && {vb} --mode hw --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -s kerncov.log ] && echo HW_ORD_PCS=$(wc -l < kerncov.log) && {{ [ $(wc -l < kerncov.log) -gt $(sort -u kerncov.log | wc -l) ] && echo HW_ORD_DUPS_OK; sort kerncov.log | cmp -s - kerncov.log || echo HW_ORD_SEQ_OK; }}; grep -q 'Ordered Kernel Execution Trace' coverage.html 2>/dev/null && echo HW_ORD_HTML_OK"
+        );
+        let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
+        self.vlog(&r, false);
+        let out = r.stdout_str();
+        if out.contains("requires privileges")
+            || out.contains("no hardware trace PMU")
+            || out.contains("start failed")
+            || out.contains("perf_event_open")
+        {
+            self.log("SKIP", &format!("hw --ordered{tag}: perf unavailable"));
+            return;
+        }
+        match field(&out, "HW_ORD_PCS=") {
+            Some(v) if v.parse::<i64>().unwrap_or(0) > 0 => {
+                self.log("PASS", &format!("hw --ordered{tag}: {v} PCs in sequence"));
+            }
+            _ => {
+                self.log("FAIL", &format!("hw --ordered{tag}: no coverage"));
+                self.vlog(&r, true);
+                return;
+            }
+        }
+        if out.contains("HW_ORD_DUPS_OK") {
+            self.log("PASS", &format!("  duplicates preserved (no dedup){tag}"));
+        } else {
+            self.log("FAIL", &format!("  log was deduplicated{tag}"));
+        }
+        if out.contains("HW_ORD_SEQ_OK") {
+            self.log("PASS", &format!("  chronological order (timestamp-merged){tag}"));
+        } else {
+            self.log("FAIL", &format!("  log is sorted, not execution order{tag}"));
+        }
+        if out.contains("HW_ORD_HTML_OK") {
+            self.log("PASS", &format!("  coverage.html is the ordered trace{tag}"));
+        } else {
+            self.log("FAIL", &format!("  coverage.html lacks the ordered trace{tag}"));
+        }
+        self.sample("kerncov.log", 3);
     }
 
     /// One full HW-trace backend sweep (ptrace / sud / ebpf), executed on the
@@ -637,14 +758,17 @@ impl Harness {
                 self.log("FAIL", &format!("hw+{backend}+vmlinux{tag}: failed"));
                 self.vlog(&r, true);
             }
+            self.sample("kerncov.log", 2);
             if let Some(v) = field(&out, "TRACE_OK=") {
                 self.log("PASS", &format!("  trace.log: {v} syscalls"));
+                self.sample("trace.log", 2);
             }
             if out.contains("FMT_OK") {
                 self.log("PASS", "  strace format verified");
             }
             if let Some(v) = field(&out, "SYZ_OK=") {
                 self.log("PASS", &format!("  trace.syz: {v} syscalls"));
+                self.sample("trace.syz", 1);
             }
         }
     }
@@ -742,6 +866,7 @@ impl Harness {
         } else {
             self.log("SKIP", "decrypt verification skipped (async completion / contended run)");
         }
+        self.sample("kerncov.log", 2);
         for f in target::CRYPTO_FILES {
             let _ = std::fs::remove_file(ksdir.join(f));
         }
