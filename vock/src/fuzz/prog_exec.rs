@@ -60,7 +60,7 @@ const KCOV_INIT_TRACE: libc::c_ulong = 0x8008_6301;
 const KCOV_ENABLE: libc::c_ulong = 0x6364;
 const KCOV_DISABLE: libc::c_ulong = 0x6365;
 const KCOV_TRACE_PC: libc::c_ulong = 0;
-const COVER_SIZE: usize = 256 << 10;
+const COVER_SIZE: usize = 2 << 20; // 16 MiB map; Rust kernels emit dense coverage
 
 /// Shift a raw KCOV PC back onto the calling instruction.
 /// (`backend.PreviousInstructionPC`, pkg/cover/backend/pc.go.)

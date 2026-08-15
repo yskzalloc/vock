@@ -12,7 +12,14 @@ use std::cell::Cell;
 use std::ffi::CStr;
 use std::io::Write;
 
-const COVER_SZ: usize = 64 << 10;
+// 2M entries (16 MiB map): a 64K buffer saturates during process startup
+// alone (dynamic linking easily produces 65535 entries), silently losing the
+// PCs of everything the target does afterwards - observed as a Rust misc
+// device whose executed write path never appeared in coverage. Rust-enabled
+// kernels emit denser coverage still (~200K entries for a small target), so
+// leave an order of magnitude of headroom; the kernel accepts KCOV_INIT_TRACE
+// sizes up to INT_MAX/8 entries.
+const COVER_SZ: usize = 2 << 20;
 
 // KCOV ioctl encodings (asm-generic).
 const KCOV_INIT_TRACE: libc::c_ulong = 0x8008_6301; // _IOR('c', 1, unsigned long)

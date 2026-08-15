@@ -25,15 +25,44 @@ fn center(s: &str, width: usize, fill: char) -> String {
 
 pub fn print_report(
     cov: &BTreeMap<String, BTreeSet<usize>>,
+    funcs: &BTreeMap<String, BTreeMap<usize, String>>,
     kernel_src: &str,
     before: i32,
     after: i32,
     filter_kw: Option<&str>,
 ) {
+    print!("{}", render(cov, funcs, kernel_src, before, after, filter_kw, true));
+}
+
+/// Plain-text form of the same report — what kerncov.log and asmcov.log
+/// carry after processing.
+pub fn render_text(
+    cov: &BTreeMap<String, BTreeSet<usize>>,
+    funcs: &BTreeMap<String, BTreeMap<usize, String>>,
+    kernel_src: &str,
+    before: i32,
+    after: i32,
+    filter_kw: Option<&str>,
+) -> String {
+    render(cov, funcs, kernel_src, before, after, filter_kw, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render(
+    cov: &BTreeMap<String, BTreeSet<usize>>,
+    funcs: &BTreeMap<String, BTreeMap<usize, String>>,
+    kernel_src: &str,
+    before: i32,
+    after: i32,
+    filter_kw: Option<&str>,
+    color: bool,
+) -> String {
+    let (g, r, yb, cy) = if color { (G, R, YB, CY) } else { ("", "", "", "") };
+    let mut out = String::new();
     let src_root = Path::new(kernel_src);
     let before = before.max(0) as usize;
     let after = after.max(0) as usize;
-    println!("\n{}", center(" Coverage Report ", 80, '-'));
+    out.push_str(&format!("\n{}\n", center(" Coverage Report ", 80, '-')));
 
     for (fpath, covered) in cov {
         if let Some(kw) = filter_kw {
@@ -42,13 +71,13 @@ pub fn print_report(
             }
         }
         let full = src_root.join(fpath);
-        println!("\n📄 {YB}{fpath}{R} ({} lines)", covered.len());
+        out.push_str(&format!("\n📄 {yb}{fpath}{r} ({} lines)\n", covered.len()));
 
         let content = match std::fs::read_to_string(&full) {
             Ok(c) => c,
             Err(_) => {
                 let nums: Vec<String> = covered.iter().map(|n| n.to_string()).collect();
-                println!("   {}", nums.join(" "));
+                out.push_str(&format!("   {}\n", nums.join(" ")));
                 continue;
             }
         };
@@ -62,10 +91,23 @@ pub fn print_report(
             }
         }
 
+        // Kernel-patch-style hunk headers: each gap prints the function the
+        // next covered line belongs to, like "@@ ... @@ func" in a diff.
+        let ffuncs = funcs.get(fpath);
         let mut last: i64 = -1;
         for &ln in &show {
             if ln as i64 != last + 1 {
-                println!("{CY}   ...{R}");
+                let func = ffuncs.and_then(|m| {
+                    covered
+                        .range(ln..)
+                        .next()
+                        .and_then(|c| m.get(c))
+                        .map(String::as_str)
+                });
+                match func {
+                    Some(f) => out.push_str(&format!("{cy}   ... @@ {f}{r}\n")),
+                    None => out.push_str(&format!("{cy}   ...{r}\n")),
+                }
             }
             let text = if ln <= all_lines.len() {
                 all_lines[ln - 1]
@@ -73,12 +115,13 @@ pub fn print_report(
                 ""
             };
             if covered.contains(&ln) {
-                println!("{G}{ln:5} > {text}{R}");
+                out.push_str(&format!("{g}{ln:5} > {text}{r}\n"));
             } else {
-                println!("{ln:5} | {text}");
+                out.push_str(&format!("{ln:5} | {text}\n"));
             }
             last = ln as i64;
         }
-        println!("{CY}   ...{R}");
+        out.push_str(&format!("{cy}   ...{r}\n"));
     }
+    out
 }

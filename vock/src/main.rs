@@ -69,7 +69,8 @@ options:
   --ordered           sequential output: kcov per-TID coverage-<TID>.html,
                       hw a single time-ordered coverage.html
   --filter KW         filter coverage report to matching paths
-  -A N, -B N          context lines in coverage report
+  -d, --output-dir D  write all artifacts into D (created if missing)
+  -A N, -B N, -C N    context lines in the processed coverage artifacts\n                      (kerncov.log, asmcov.log, coverage.html; default 3, patch-style)
 
 examples:
   vock /bin/ip addr show              kernel coverage (HW mode, default)
@@ -177,6 +178,7 @@ fn real_main() -> i32 {
     let mut syscall_backend = "ptrace".to_string();
     let mut ctx_after: i32 = -1;
     let mut ctx_before: i32 = -1;
+    let mut output_dir: Option<String> = None;
     let mut ordered = false;
     let mut cmd_idx: i64 = -1;
 
@@ -207,6 +209,19 @@ fn real_main() -> i32 {
         } else if a == "-B" && i + 1 < args.len() {
             i += 1;
             ctx_before = args[i].parse().unwrap_or(0);
+        } else if (a == "-d" || a == "--output-dir") && i + 1 < args.len() {
+            i += 1;
+            output_dir = Some(args[i].clone());
+        } else if a == "-C" && i + 1 < args.len() {
+            // diff-style: context on both sides; -A / -B override per side.
+            i += 1;
+            let c: i32 = args[i].parse().unwrap_or(0);
+            if ctx_after < 0 {
+                ctx_after = c;
+            }
+            if ctx_before < 0 {
+                ctx_before = c;
+            }
         } else if a == "--syscall" {
             syscall_on = true;
             if i + 1 < args.len()
@@ -287,6 +302,7 @@ fn real_main() -> i32 {
         } else if a == "report" {
             // Standalone coverage report (replaces `python3 output.py`).
             let mut o = report::Options::default();
+            let mut report_dir: Option<String> = None;
             // Track whether kernel-src / vmlinux were explicitly set so the
             // auto-detect defaults kick in exactly like output.py.
             let mut ks_set = false;
@@ -322,6 +338,16 @@ fn real_main() -> i32 {
                         i += 1;
                         o.ctx_before = args[i].parse().unwrap_or(4);
                     }
+                    "-C" if i + 1 < args.len() => {
+                        i += 1;
+                        let c: i32 = args[i].parse().unwrap_or(3);
+                        o.ctx_after = c;
+                        o.ctx_before = c;
+                    }
+                    "-d" | "--output-dir" if i + 1 < args.len() => {
+                        i += 1;
+                        report_dir = Some(args[i].clone());
+                    }
                     "-o" | "--output" if i + 1 < args.len() => {
                         i += 1;
                         o.output = args[i].clone();
@@ -330,7 +356,7 @@ fn real_main() -> i32 {
                     "--ordered" => o.ordered = true,
                     "--help" | "-h" => {
                         eprintln!(
-                            "vock report — regenerate a coverage report from a log\n\nusage: vock report [--log kerncov.log] [--vmlinux F] [--kernel-src D]\n                   [--btf] [--ordered] [--filter KW] [-A N] [-B N]\n                   [-o coverage.html] [-q]"
+                            "vock report — regenerate a coverage report from a log\n\nusage: vock report [--log kerncov.log] [--vmlinux F] [--kernel-src D]\n                   [--btf] [--ordered] [--filter KW] [-A N] [-B N] [-C N] [-d DIR]\n                   [-o coverage.html] [-q]"
                         );
                         return 0;
                     }
@@ -339,6 +365,35 @@ fn real_main() -> i32 {
                 i += 1;
             }
             let _ = (ks_set, vm_set);
+            if let Some(d) = &report_dir {
+                // Absolutize the inputs, then produce everything inside -d.
+                for p in [&mut o.log] {
+                    let pb = std::path::PathBuf::from(&*p);
+                    if pb.is_relative() {
+                        if let Ok(c) = std::env::current_dir() {
+                            *p = c.join(pb).to_string_lossy().into_owned();
+                        }
+                    }
+                }
+                for p in [&mut o.vmlinux, &mut o.kernel_src] {
+                    if let Some(v) = p {
+                        let pb = std::path::PathBuf::from(&*v);
+                        if pb.is_relative() {
+                            if let Ok(c) = std::env::current_dir() {
+                                *v = c.join(pb).to_string_lossy().into_owned();
+                            }
+                        }
+                    }
+                }
+                if let Err(e) = std::fs::create_dir_all(d) {
+                    eprintln!("error: cannot create output dir {d}: {e}");
+                    return 1;
+                }
+                if let Err(e) = std::env::set_current_dir(d) {
+                    eprintln!("error: cannot enter output dir {d}: {e}");
+                    return 1;
+                }
+            }
             return report::run(&o);
         } else if a == "prog2c" {
             let mut syz_file: Option<String> = None;
@@ -434,6 +489,34 @@ fn real_main() -> i32 {
                 }
             }
         }
+    }
+
+    // -d/--output-dir: every artifact vock and its preloaded children write
+    // is cwd-relative, so pointing the run at a directory is one chdir. The
+    // directory is created if missing; input paths are absolutized first so
+    // they keep meaning from the new cwd.
+    if let Some(d) = &output_dir {
+        let absolutize = |p: &mut Option<String>| {
+            if let Some(v) = p {
+                let pb = std::path::PathBuf::from(&v);
+                if pb.is_relative() {
+                    if let Ok(c) = std::env::current_dir() {
+                        *v = c.join(pb).to_string_lossy().into_owned();
+                    }
+                }
+            }
+        };
+        absolutize(&mut vmlinux);
+        absolutize(&mut kernel_src);
+        if let Err(e) = std::fs::create_dir_all(d) {
+            eprintln!("error: cannot create output dir {d}: {e}");
+            return 1;
+        }
+        if let Err(e) = std::env::set_current_dir(d) {
+            eprintln!("error: cannot enter output dir {d}: {e}");
+            return 1;
+        }
+        eprintln!("[vock] writing artifacts to {d}/");
     }
 
     // SUD runs BEFORE coverage (LD_PRELOAD, same process); ptrace/eBPF fork

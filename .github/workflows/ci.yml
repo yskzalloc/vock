@@ -62,6 +62,12 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         # Each step is a fresh shell that does not source ~/.cargo/env.
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        # Kernel Rust toolchain for selftest 5 (Rust-for-Linux coverage):
+        # the kernel needs the core library source and the bindings
+        # generator on top of rustc. selftest 5 gates on `make
+        # rustavailable` and SKIPs cleanly if any of this is missing.
+        "$HOME/.cargo/bin/rustup" component add rust-src
+        "$HOME/.cargo/bin/cargo" install bindgen-cli
 
     - name: Toolchain info
       run: |
@@ -97,6 +103,16 @@ jobs:
                 verdict=FAIL
                 rc=1
             fi
+            # Keep the actual coverage artifacts of this test, not just its
+            # stdout: they land in the kernel tree (shared cwd of the runs),
+            # so harvest them into a per-test directory (created on demand)
+            # that the upload step publishes alongside the log.
+            mkdir -p "selftest-logs/$slug"
+            for f in staging/kerncov.log staging/srccov.log staging/asmcov.log \
+                     staging/coverage.html staging/coverage-*.html \
+                     staging/trace.log staging/trace.syz; do
+                [ -f "$f" ] && cp "$f" "selftest-logs/$slug/" || true
+            done
             local line
             line=$(grep -oE 'Results: [^=]*' "selftest-logs/$slug.log" | tail -1)
             printf '%s\t%s\t%s\t%s\t%s\n' \
@@ -139,6 +155,9 @@ jobs:
         run_test test3 3 "Test 3: --filter + xts(aes) crypto ($ON)" \
             ./vock.bin selftest 3 -v --on $ON $KSRC
 
+        run_test test5 5 "Test 5: Rust module coverage ($ON)" \
+            ./vock.bin selftest 5 -v --on $ON $KSRC
+
         exit $rc
 
     # One artifact per test so each result is downloadable through its own
@@ -149,7 +168,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: selftest-1-${{ matrix.arch }}
-        path: selftest-logs/test1.log
+        path: |
+          selftest-logs/test1.log
+          selftest-logs/test1/
         if-no-files-found: ignore
 
     - name: Upload test 2.1 log
@@ -158,7 +179,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: selftest-2-host-${{ matrix.arch }}
-        path: selftest-logs/test2-host.log
+        path: |
+          selftest-logs/test2-host.log
+          selftest-logs/test2-host/
         if-no-files-found: ignore
 
     - name: Upload test 2.2 log
@@ -167,7 +190,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: selftest-2-guest-${{ matrix.arch }}
-        path: selftest-logs/test2-guest.log
+        path: |
+          selftest-logs/test2-guest.log
+          selftest-logs/test2-guest/
         if-no-files-found: ignore
 
     - name: Upload test 3 log
@@ -176,7 +201,20 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: selftest-3-${{ matrix.arch }}
-        path: selftest-logs/test3.log
+        path: |
+          selftest-logs/test3.log
+          selftest-logs/test3/
+        if-no-files-found: ignore
+
+    - name: Upload test 5 log
+      if: always()
+      id: up-test5
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-5-${{ matrix.arch }}
+        path: |
+          selftest-logs/test5.log
+          selftest-logs/test5/
         if-no-files-found: ignore
 
     - name: Job summary
@@ -190,6 +228,7 @@ jobs:
         URL_TEST2_HOST: ${{ steps.up-test2-host.outputs.artifact-url }}
         URL_TEST2_GUEST: ${{ steps.up-test2-guest.outputs.artifact-url }}
         URL_TEST3: ${{ steps.up-test3.outputs.artifact-url }}
+        URL_TEST5: ${{ steps.up-test5.outputs.artifact-url }}
         ARCH: ${{ matrix.arch }}
       run: |
         while IFS=$'\t' read -r slug raw verdict title line; do
@@ -198,6 +237,7 @@ jobs:
                 test2-host)  url="$URL_TEST2_HOST" ;;
                 test2-guest) url="$URL_TEST2_GUEST" ;;
                 test3)       url="$URL_TEST3" ;;
+                test5)       url="$URL_TEST5" ;;
                 *)           url="" ;;
             esac
             icon=$([ "$verdict" = PASS ] && echo ':white_check_mark:' || echo ':x:')

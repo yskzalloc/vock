@@ -12,9 +12,13 @@ use std::process::{Command, Stdio};
 /// VM the OOM killer takes it mid-run and the tail of the coverage silently
 /// disappears. The input is sorted, so consecutive addresses cluster by CU
 /// and the per-chunk re-parsing costs little.
-const ADDR2LINE_CHUNK: usize = 4096;
+const ADDR2LINE_CHUNK: usize = 2048;
 
-pub fn run_addr2line(vmlinux: &str, addrs: &[String]) -> Vec<String> {
+/// Resolutions come back as (function, file:line) pairs — `-f` makes
+/// addr2line emit the function name on its own line before each location,
+/// so every consumer (report hunks, srccov, asmcov, the ordered table) can
+/// show kernel-patch-style function context.
+pub fn run_addr2line(vmlinux: &str, addrs: &[String]) -> Vec<(String, String)> {
     if addrs.is_empty() || !Path::new(vmlinux).is_file() {
         return Vec::new();
     }
@@ -25,8 +29,10 @@ pub fn run_addr2line(vmlinux: &str, addrs: &[String]) -> Vec<String> {
     lines
 }
 
-fn addr2line_batch(vmlinux: &str, addrs: &[String]) -> Vec<String> {
+fn addr2line_batch(vmlinux: &str, addrs: &[String]) -> Vec<(String, String)> {
     let mut child = match Command::new("addr2line")
+        .arg("-f")
+        .arg("-C")
         .arg("-e")
         .arg(vmlinux)
         .stdin(Stdio::piped())
@@ -55,27 +61,38 @@ fn addr2line_batch(vmlinux: &str, addrs: &[String]) -> Vec<String> {
     match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);
-            let t = s.trim();
-            if t.is_empty() {
-                Vec::new()
-            } else {
-                t.lines().map(|l| l.to_string()).collect()
+            let mut v = Vec::new();
+            let mut it = s.lines();
+            // -f output alternates: function name line, then file:line.
+            while let (Some(func), Some(loc)) = (it.next(), it.next()) {
+                v.push((func.to_string(), loc.to_string()));
             }
+            v
         }
         Err(_) => Vec::new(),
     }
 }
 
-const KERNEL_DIRS: &[&str] = &[
+pub(crate) const KERNEL_DIRS: &[&str] = &[
     "arch/", "fs/", "net/", "drivers/", "kernel/", "mm/", "block/", "security/",
     "crypto/", "lib/", "ipc/", "init/", "include/", "sound/", "virt/", "io_uring/",
 ];
 
-/// Group `file:line` results into {relative source path → set of line numbers}.
-pub fn aggregate(lines: &[String], kernel_src: &str) -> BTreeMap<String, BTreeSet<usize>> {
+/// Group (function, file:line) results into {relative source path → set of
+/// line numbers} plus {relative source path → {line → function}} so the
+/// renderers can show kernel-patch-style function context per hunk.
+#[allow(clippy::type_complexity)]
+pub fn aggregate(
+    lines: &[(String, String)],
+    kernel_src: &str,
+) -> (
+    BTreeMap<String, BTreeSet<usize>>,
+    BTreeMap<String, BTreeMap<usize, String>>,
+) {
     let mut cov: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    let mut funcs: BTreeMap<String, BTreeMap<usize, String>> = BTreeMap::new();
 
-    for line in lines {
+    for (func, line) in lines {
         // Match "<file>:<lineno>" (lineno may be followed by " (discriminator N)").
         let Some(colon) = line.rfind(':') else { continue };
         let (file_path, rest) = (&line[..colon], &line[colon + 1..]);
@@ -87,26 +104,39 @@ pub fn aggregate(lines: &[String], kernel_src: &str) -> BTreeMap<String, BTreeSe
             continue;
         }
 
-        let mut rel = relpath(file_path, kernel_src);
-        if rel.starts_with("..") {
-            let mut matched = false;
-            for kd in KERNEL_DIRS {
-                if let Some(idx) = file_path.find(&format!("/{kd}")) {
-                    rel = file_path[idx + 1..].to_string();
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                rel = match file_path.rsplit_once('/') {
-                    Some((_, base)) => base.to_string(),
-                    None => file_path.to_string(),
-                };
+        let rel = rel_kernel_path(file_path, kernel_src);
+        cov.entry(rel.clone()).or_default().insert(lineno);
+        if func != "??" && !func.is_empty() {
+            funcs.entry(rel).or_default().insert(lineno, func.clone());
+        }
+    }
+    (cov, funcs)
+}
+
+/// Normalize a DWARF build path onto the kernel tree: relative to
+/// `kernel_src` when possible, else re-rooted at the first recognizable
+/// kernel directory ("debian/build/.../fs/open.c" becomes "fs/open.c"),
+/// else the bare file name. This is what makes hw-mode output read like
+/// KCOV's: every consumer shows the same clean kernel-relative paths.
+pub(crate) fn rel_kernel_path(file_path: &str, kernel_src: &str) -> String {
+    let mut rel = relpath(file_path, kernel_src);
+    if rel.starts_with("..") {
+        let mut matched = false;
+        for kd in KERNEL_DIRS {
+            if let Some(idx) = file_path.find(&format!("/{kd}")) {
+                rel = file_path[idx + 1..].to_string();
+                matched = true;
+                break;
             }
         }
-        cov.entry(rel).or_default().insert(lineno);
+        if !matched {
+            rel = match file_path.rsplit_once('/') {
+                Some((_, base)) => base.to_string(),
+                None => file_path.to_string(),
+            };
+        }
     }
-    cov
+    rel
 }
 
 /// Best-effort equivalent of Python's os.path.relpath(file, start).

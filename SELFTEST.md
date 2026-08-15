@@ -19,6 +19,9 @@ vock selftest 2 --on vng-kvm --kernel-src ~/stable   # AMD LBR
 # Test 3 — --filter + xts(aes) crypto coverage (VM)
 vock selftest 3 --on vng-kvm --kernel-src ~/stable
 
+# Test 5 — Rust-for-Linux module coverage (VM; skips without a kernel Rust toolchain)
+vock selftest 5 --on vng-kvm --kernel-src ~/stable
+
 # All four
 vock selftest --on vng-kvm --kernel-src ~/stable
 
@@ -30,7 +33,7 @@ vock selftest 1 --on vng-tcg --kernel-src ~/stable
 
 ```
 vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH]
-              [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-4]
+              [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-5]
 ```
 
 `vock selftest --help` also prints, for every test, the equivalent raw
@@ -57,6 +60,7 @@ separate from the harness.
 | 2 | Intel PT / AMD LBR / Arm64 CoreSight | **host** (AMD LBR: vng too) | Detects the host CPU and runs the matching HW engine: HW + vmlinux × each `--syscall` + `--syzlang` |
 | 3 | Filter + xts Crypto | vng | `--filter` narrowed xts(aes) decrypt coverage + plaintext verification |
 | 4 | KASAN bug hunt | vng | build a KASAN+KCOV kernel; loop a sample reproducer (MIDI UAF) for ≤30 min, watching for a KASAN report |
+| 5 | Rust module coverage | vng | build a KCOV kernel with `CONFIG_RUST` + the built-in `rust_misc_device` sample; write()/read()/ioctl() into it from userspace and assert `.rs` source lines (incl. `write_iter`) appear in the coverage; SKIPs without a kernel Rust toolchain |
 
 ## Test 1: Coverage + Syscall + Syzlang (vng)
 
@@ -188,6 +192,32 @@ the original.
 > SKIP-not-FAIL; coverage collection, report generation and `--filter` are
 > asserted.
 
+## Test 5: Rust-for-Linux module coverage (vng)
+
+Builds a KCOV kernel with `CONFIG_RUST` and the **built-in**
+`rust_misc_device` sample, then traces `vock selftest target rust-touch`:
+a userspace program that `write()`s into `/dev/rust-misc-device` (landing in
+the sample's Rust `write_iter`), reads back, and drives its three ioctls.
+
+Asserts, host-side on the artifacts:
+
+* `.rs` source lines appear in `srccov.log` — KCOV instruments Rust kernel
+  code end to end
+* the **write path** is covered (`write_iter` in the resolved coverage; the
+  traced fops are generic wrappers from `rust/kernel/miscdevice.rs`
+  instantiated for the sample)
+* `coverage.html` shows the sample via the instantiated generic names
+* Rust symbols are reported in **both forms**: the original v0-mangled name
+  (as in kallsyms/nm) and the demangled one
+
+A second pass runs the hw engine against the same device as a bonus
+(SKIP-not-FAIL: statistical sampling, IP fallback in guests). The whole test
+SKIPs cleanly when `make rustavailable` fails — the kernel Rust toolchain
+needs `rustc`, `bindgen-cli` (`cargo install bindgen-cli`) and the rustup
+`rust-src` component. Coverage buffers are sized for Rust kernels (2M
+entries): a Rust-enabled kernel emits dense coverage and small buffers
+saturate during process startup, silently losing the device ops.
+
 ## Test 4: KASAN bug hunt (vng)
 
 Builds a **KASAN + KCOV** kernel (with the sound / USB-MIDI surface) and loops
@@ -215,7 +245,8 @@ silently — those return `ENOSYS` and are named on startup. See
 
 | Test | Target | Kernel subsystem |
 |------|--------|-----------------|
-| 1 | `/bin/ls /tmp` | vfs / general syscall paths |
+| 1 | `/bin/touch "/tmp/$(date +%s).txt"` | vfs write path (openat O_CREAT, inode alloc, utimensat); the harness asserts inode/write functions appear in `srccov.log` |
+| 2 | `/bin/ls /tmp` | vfs / general syscall paths |
 | 3 | `vock selftest target crypto-decrypt` (AF_ALG xts(aes)) | crypto (skcipher, aes, xts) |
 
 ## Kernel Configuration
@@ -266,7 +297,8 @@ itself is built with `cargo` (any `CC=` passed to `make` is ignored).
 ## GitHub CI
 
 The workflow lives in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-and runs tests 1, 2 and 3 on x86_64 and arm64 runners. Each job writes a
+and runs tests 1, 2, 3 and 5 on x86_64 and arm64 runners (the CI installs
+`bindgen-cli` and `rust-src`, so test 5 runs rather than skipping). Each job writes a
 **summary table** (test, verdict, pass/fail/skip counts) to the Actions
 run's Summary tab, uploads every test's full log as its **own artifact**
 linked from that table, and appends the reproducible raw command for each

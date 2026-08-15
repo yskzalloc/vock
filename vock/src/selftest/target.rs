@@ -15,7 +15,13 @@
 
 use std::path::Path;
 
-/// Test 1 / Test 2 workload: plain syscall traffic through vfs paths.
+/// Test 1 workload: create a unique file. `touch` drives the vfs write path
+/// end to end (openat with O_CREAT, inode allocation, utimensat), so the
+/// harness can assert that inode/write related functions really appear in
+/// the resolved coverage.
+pub const KCOV_TARGET: &str = "/bin/touch \"/tmp/$(date +%s).txt\"";
+
+/// Test 2 workload: plain syscall traffic through vfs paths.
 pub const COVERAGE_TARGET: &str = "/bin/ls /tmp";
 
 /// Test 3 traced target: this same vock binary running the AF_ALG decrypt.
@@ -45,6 +51,54 @@ const IV: [u8; 16] = [0; 16];
 /// Every file the crypto test stages or produces, for cleanup.
 pub const CRYPTO_FILES: &[&str] = &[BLOCK_IMG, BLOCK_ENC, BLOCK_DEC, KEY_FILE];
 
+/// Test 5 traced target: this vock binary driving the Rust misc-device
+/// sample from userspace.
+pub const RUST_TARGET_ARGS: &[&str] = &["selftest", "target", "rust-touch"];
+
+/// The Rust sample's device node (samples/rust/rust_misc_device.rs).
+pub const RUST_MISC_DEV: &str = "/dev/rust-misc-device";
+
+// ioctls from the sample's doc block: _IO/_IOR/_IOW('|', ...).
+const RUST_MISC_DEV_HELLO: libc::c_ulong = 0x7c80;
+const RUST_MISC_DEV_GET_VALUE: libc::c_ulong = 0x8004_7c81;
+const RUST_MISC_DEV_SET_VALUE: libc::c_ulong = 0x4004_7c82;
+
+/// Exercise the Rust misc device end to end, write path first: write()
+/// lands in the sample's write_iter, read() in read_iter, and the three
+/// ioctls in its ioctl handler — all Rust kernel code reached from
+/// userspace in this single traced task.
+pub fn rust_touch() -> Result<(), String> {
+    let path = std::ffi::CString::new(RUST_MISC_DEV).unwrap();
+    let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR) };
+    if fd < 0 {
+        return Err(format!(
+            "open {RUST_MISC_DEV}: {} (CONFIG_SAMPLE_RUST_MISC_DEVICE=y?)",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let ok = unsafe {
+        let msg = b"vock rust write path";
+        let w = libc::write(fd, msg.as_ptr() as *const libc::c_void, msg.len());
+        let mut buf = [0u8; 64];
+        let r = libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len());
+        let hello = libc::ioctl(fd, RUST_MISC_DEV_HELLO, 0usize);
+        let mut value: libc::c_int = 42;
+        let set = libc::ioctl(fd, RUST_MISC_DEV_SET_VALUE, &value as *const libc::c_int);
+        let get = libc::ioctl(fd, RUST_MISC_DEV_GET_VALUE, &mut value as *mut libc::c_int);
+        libc::close(fd);
+        // write_iter is the aspect under test; the rest is best-effort.
+        println!(
+            "rust-touch: write={w} read={r} hello={hello} set={set} get={get} value={value}"
+        );
+        w > 0
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("write() into the Rust misc device failed".into())
+    }
+}
+
 /// Dispatcher for `vock selftest target <name>` — the in-VM halves of the
 /// selftest workloads.
 pub fn run_target(args: &[String]) -> i32 {
@@ -59,6 +113,13 @@ pub fn run_target(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("rust-touch") => match rust_touch() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("rust-touch: {e}");
+                1
+            }
+        },
         Some("crypto-decrypt") => match crypto_decrypt(Path::new(".")) {
             Ok(()) => 0,
             Err(e) => {
@@ -67,7 +128,7 @@ pub fn run_target(args: &[String]) -> i32 {
             }
         },
         _ => {
-            eprintln!("vock selftest target: expected crypto-setup | crypto-decrypt");
+            eprintln!("vock selftest target: expected crypto-setup | crypto-decrypt | rust-touch");
             2
         }
     }
@@ -245,7 +306,7 @@ pub fn raw_command(test: &str) -> Option<String> {
     match test {
         "1" => Some(format!(
             "vng --rw -- vock --mode kcov --syzlang --syscall ptrace \\\n\
-    --vmlinux ./vmlinux --kernel-src . {COVERAGE_TARGET}\n\
+    --vmlinux ./vmlinux --kernel-src . {KCOV_TARGET}\n\
 ... repeated for --syscall sud/ebpf, with --btf instead of --vmlinux,\n\
 and with --ordered / --filter fs   (sud runs need: {SUD_SETUP})"
         )),
@@ -268,6 +329,12 @@ vng --rw -- vock --mode kcov --filter crypto --vmlinux ./vmlinux --kernel-src . 
         "4" => Some(format!(
             "vng --rw -- vock execprog -repeat=0 -procs=4 {KASAN_SAMPLE}"
         )),
+        "5" => Some(format!(
+            "vng --rw -- vock --mode kcov --vmlinux ./vmlinux --kernel-src . \\\n\
+    vock selftest target rust-touch\n\
+# the target write()s/read()s/ioctl()s {RUST_MISC_DEV} (built-in Rust\n\
+# sample); needs CONFIG_RUST=y and a kernel Rust toolchain (make rustavailable)"
+        )),
         _ => None,
     }
 }
@@ -280,7 +347,7 @@ pub fn help_raw_commands() -> String {
 configures + builds the kernel via `vng --force --configitem ... --build`;\n\
 `vock` is whichever binary you run — ./vock.bin in a build tree works too):\n",
     );
-    for t in ["1", "2", "3", "4"] {
+    for t in ["1", "2", "3", "4", "5"] {
         let block = raw_command(t).unwrap_or_default();
         let mut lines = block.lines();
         if let Some(first) = lines.next() {

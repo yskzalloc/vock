@@ -22,7 +22,10 @@ mod target;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
-use target::{help_raw_commands, COVERAGE_TARGET, CRYPTO_TARGET_ARGS, KASAN_SAMPLE, SUD_SETUP};
+use target::{
+    help_raw_commands, COVERAGE_TARGET, CRYPTO_TARGET_ARGS, KASAN_SAMPLE, KCOV_TARGET,
+    RUST_TARGET_ARGS, SUD_SETUP,
+};
 
 // ─── command runner with timeout ────────────────────────────────────────────
 
@@ -376,10 +379,12 @@ impl Harness {
         if on_host {
             return run(cmd, Some(&self.kernel_src), timeout);
         }
-        // 2G: the report step runs addr2line over the DWARF5 vmlinux inside
-        // the guest, which peaks around 1 GiB RSS — vng's default 1G guest
-        // OOM-kills it mid-resolution and the coverage silently loses files.
-        let mut vng = sv(&["vng", "--rw", "--memory", "2G"]);
+        // 4G: the report step runs addr2line over the DWARF5 vmlinux inside
+        // the guest. vng's default 1G guest OOM-kills it mid-resolution and
+        // the coverage silently loses files, and a Rust-enabled kernel's
+        // debug info (core/kernel crate CUs) needs headroom beyond 2G — the
+        // symptom is "??" for the highest addresses, which sort last.
+        let mut vng = sv(&["vng", "--rw", "--memory", "4G"]);
         if self.run_target == "vng-tcg" {
             vng.push("--disable-kvm".into());
         }
@@ -427,7 +432,7 @@ impl Harness {
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
         let vb = self.vock_bin.clone();
-        let tgt = COVERAGE_TARGET;
+        let tgt = KCOV_TARGET;
 
         println!("\n── Group A: KCOV + vmlinux + syzlang ──");
         let diag = self.vng_run(&sv(&[
@@ -442,7 +447,7 @@ impl Harness {
             println!("\n[Test: --mode kcov --syzlang --syscall {backend} --vmlinux]");
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             let script = format!(
-                "rm -f kerncov.log coverage.html trace.log trace.syz local-*.log remote-*.log && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
+                "rm -f kerncov.log srccov.log asmcov.log coverage.html trace.log trace.syz local-*.log remote-*.log && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < srccov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK; {{ grep -qiE 'inode|utimes|vfs_' srccov.log 2>/dev/null || grep -qiE 'inode|utimes|vfs_' coverage.html 2>/dev/null; }} && echo VFS_OK"
             );
             let r = self.vng_run(&sv(&["bash", "-c", &script]));
             self.vlog(&r, false);
@@ -454,7 +459,7 @@ impl Harness {
             println!("\n[Test: --mode kcov --syzlang --syscall {backend} --btf --kernel-src]");
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             let script = format!(
-                "rm -f kerncov.log coverage.html trace.log trace.syz && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
+                "rm -f kerncov.log srccov.log asmcov.log coverage.html trace.log trace.syz && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK; {{ grep -qiE 'inode|utimes|vfs_' srccov.log 2>/dev/null || grep -qiE 'inode|utimes|vfs_' coverage.html 2>/dev/null; }} && echo VFS_OK"
             );
             let r = self.vng_run(&sv(&["bash", "-c", &script]));
             self.vlog(&r, false);
@@ -502,7 +507,7 @@ impl Harness {
         } else {
             self.log("FAIL", "--ordered: HTML report lacks the ordered trace table");
         }
-        self.sample_largest("local-", ".log", 3);
+        self.sample_largest("srccov-local-", ".log", 3);
 
         println!("\n[Test: --mode kcov --filter fs --vmlinux]");
         let script = format!(
@@ -518,6 +523,34 @@ impl Harness {
         } else {
             self.log("FAIL", "--filter fs: no filtered report");
         }
+
+        // Context options shape the processed artifacts: with -C 0 the
+        // kerncov.log excerpt report must contain no context (" | ") lines
+        // at all, and with -C 2 it must. srccov.log is raw data and is
+        // identical either way (same line count as the PC stream).
+        println!("\n[Test: -C context in processed artifacts]");
+        let script = format!(
+            "rm -f kerncov.log srccov.log && {vb} --mode kcov -C 0 --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; grep -qE '^ *[0-9]+ \\| ' kerncov.log 2>/dev/null || echo CTX0_OK; S0=$(wc -l < srccov.log 2>/dev/null || echo 0); rm -f kerncov.log srccov.log && {vb} --mode kcov -C 2 --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; grep -qE '^ *[0-9]+ \\| ' kerncov.log 2>/dev/null && echo CTXN_OK; grep -qE '^ *[0-9]+ > ' kerncov.log 2>/dev/null && echo CTX_COV_OK; [ \"$S0\" -gt 0 ] && echo SRCCOV_DATA_OK=$S0"
+        );
+        let r = self.vng_run(&sv(&["bash", "-c", &script]));
+        self.vlog(&r, false);
+        let out = r.stdout_str();
+        if out.contains("CTX0_OK") {
+            self.log("PASS", "-C 0: processed kerncov.log has no context lines");
+        } else {
+            self.log("FAIL", "-C 0: context lines present despite -C 0");
+        }
+        if out.contains("CTXN_OK") && out.contains("CTX_COV_OK") {
+            self.log("PASS", "-C 2: processed kerncov.log has context + covered lines");
+        } else {
+            self.log("FAIL", "-C 2: expected context and covered lines in kerncov.log");
+        }
+        if let Some(v) = field(&out, "SRCCOV_DATA_OK=") {
+            self.log("PASS", &format!("srccov.log untouched by -C (raw data, {v} PCs)"));
+        } else {
+            self.log("FAIL", "srccov.log missing or empty under -C");
+        }
+        self.sample("kerncov.log", 4);
         true
     }
 
@@ -545,7 +578,14 @@ impl Harness {
             self.log("FAIL", &format!("{label}: failed"));
             self.vlog(r, true);
         }
-        self.sample("kerncov.log", 2);
+        self.sample("srccov.log", 2);
+        // Semantic check for the touch target: creating a file must surface
+        // inode/write related functions in the resolved coverage.
+        if out.contains("VFS_OK") {
+            self.log("PASS", "  inode/write path functions present (touch)");
+        } else {
+            self.log("FAIL", "  no inode/write functions in coverage of a file-creating target");
+        }
         if let Some(v) = field(&out, "TRACE_OK=") {
             self.log("PASS", &format!("  trace.log: {v} syscalls"));
             self.sample("trace.log", 2);
@@ -661,7 +701,7 @@ impl Harness {
         let tag = if side.is_empty() { String::new() } else { format!(" ({side})") };
         println!("\n[Test: --mode hw --ordered{tag}]");
         let script = format!(
-            "rm -f kerncov.log coverage.html && {vb} --mode hw --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -s kerncov.log ] && echo HW_ORD_PCS=$(wc -l < kerncov.log) && {{ [ $(wc -l < kerncov.log) -gt $(sort -u kerncov.log | wc -l) ] && echo HW_ORD_DUPS_OK; sort kerncov.log | cmp -s - kerncov.log || echo HW_ORD_SEQ_OK; }}; grep -q 'Ordered Kernel Execution Trace' coverage.html 2>/dev/null && echo HW_ORD_HTML_OK"
+            "rm -f kerncov.log srccov.log coverage.html && {vb} --mode hw --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -s srccov.log ] && echo HW_ORD_PCS=$(wc -l < srccov.log) && {{ [ $(wc -l < srccov.log) -gt $(sort -u srccov.log | wc -l) ] && echo HW_ORD_DUPS_OK; sort srccov.log | cmp -s - srccov.log || echo HW_ORD_SEQ_OK; }}; grep -q 'Ordered Kernel Execution Trace' coverage.html 2>/dev/null && echo HW_ORD_HTML_OK"
         );
         let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
         self.vlog(&r, false);
@@ -699,7 +739,7 @@ impl Harness {
         } else {
             self.log("FAIL", &format!("  coverage.html lacks the ordered trace{tag}"));
         }
-        self.sample("kerncov.log", 3);
+        self.sample("srccov.log", 3);
     }
 
     /// One full HW-trace backend sweep (ptrace / sud / ebpf), executed on the
@@ -716,7 +756,7 @@ impl Harness {
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             println!("\n[Test: --mode hw --syzlang --syscall {backend} --vmlinux{tag}]");
             let script = format!(
-                "rm -f kerncov.log trace.log trace.syz && {perf_pre}{sud_pre}{vb} --mode hw --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz)"
+                "rm -f kerncov.log srccov.log asmcov.log trace.log trace.syz && {perf_pre}{sud_pre}{vb} --mode hw --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < srccov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz)"
             );
             let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
             self.vlog_full(&r);
@@ -758,7 +798,7 @@ impl Harness {
                 self.log("FAIL", &format!("hw+{backend}+vmlinux{tag}: failed"));
                 self.vlog(&r, true);
             }
-            self.sample("kerncov.log", 2);
+            self.sample("srccov.log", 2);
             if let Some(v) = field(&out, "TRACE_OK=") {
                 self.log("PASS", &format!("  trace.log: {v} syscalls"));
                 self.sample("trace.log", 2);
@@ -814,7 +854,7 @@ impl Harness {
 
         // Stage plaintext/key/ciphertext host-side (AF_ALG on the host
         // kernel) directly into the shared tree; the guest only decrypts.
-        for f in ["kerncov.log", "coverage.html"] {
+        for f in ["kerncov.log", "srccov.log", "asmcov.log", "coverage.html"] {
             let _ = std::fs::remove_file(ksdir.join(f));
         }
         if let Err(e) = target::crypto_setup(&ksdir) {
@@ -836,7 +876,7 @@ impl Harness {
             self.vlog(&r, true);
         }
 
-        let pcs = std::fs::read_to_string(ksdir.join("kerncov.log"))
+        let pcs = std::fs::read_to_string(ksdir.join("srccov.log"))
             .map(|s| s.lines().count())
             .unwrap_or(0);
         if pcs > 0 {
@@ -866,9 +906,167 @@ impl Harness {
         } else {
             self.log("SKIP", "decrypt verification skipped (async completion / contended run)");
         }
-        self.sample("kerncov.log", 2);
+        self.sample("srccov.log", 2);
         for f in target::CRYPTO_FILES {
             let _ = std::fs::remove_file(ksdir.join(f));
+        }
+        true
+    }
+
+    // ── Test 5: Rust-for-Linux module coverage ──────────────────────────────
+    //
+    // Builds a KCOV kernel with CONFIG_RUST and the built-in Rust misc
+    // device sample, then traces a userspace target that writes into it:
+    // write() lands in the sample's write_iter, read()/ioctl() in their Rust
+    // handlers. The assertions read the resolved coverage host-side and
+    // require actual .rs source lines - proof that KCOV instruments Rust
+    // kernel code end to end. Skips cleanly when the kernel Rust toolchain
+    // is missing (make rustavailable) or the tree has no Rust samples.
+    fn test_rust_module(&mut self) -> bool {
+        println!("\n{}", "=".repeat(60));
+        println!("  TEST 5: Rust-for-Linux module coverage (KCOV + write path)");
+        println!("{}", "=".repeat(60));
+
+        if !Path::new(&self.kernel_src)
+            .join("samples/rust/rust_misc_device.rs")
+            .is_file()
+        {
+            self.log("SKIP", "kernel tree has no samples/rust/rust_misc_device.rs");
+            return true;
+        }
+        let r = run(
+            &sv(&["make", "rustavailable"]),
+            Some(&self.kernel_src),
+            Duration::from_secs(120),
+        );
+        if r.code != 0 {
+            self.log(
+                "SKIP",
+                "kernel Rust toolchain unavailable (make rustavailable failed; \
+need rustc, bindgen-cli, rustup component rust-src)",
+            );
+            return true;
+        }
+        self.log("PASS", "kernel Rust toolchain available");
+
+        let configs = vec![
+            ("CONFIG_DEBUG_KERNEL", true),
+            ("CONFIG_KCOV", true),
+            ("CONFIG_KCOV_INSTRUMENT_ALL", true),
+            ("CONFIG_DEBUG_FS", true),
+            ("CONFIG_DEBUG_INFO", true),
+            ("CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT", false),
+            ("CONFIG_DEBUG_INFO_DWARF5", true),
+            ("CONFIG_DEBUG_INFO_NONE", false),
+            ("CONFIG_RUST", true),
+            ("CONFIG_SAMPLES", true),
+            ("CONFIG_SAMPLES_RUST", true),
+            ("CONFIG_SAMPLE_RUST_MISC_DEVICE", true),
+            ("CONFIG_IKCONFIG", true),
+            ("CONFIG_IKCONFIG_PROC", true),
+        ];
+        if !self.kernel_configure_and_build(&configs) {
+            self.log("FAIL", "kernel configure+build failed (CONFIG_RUST)");
+            return false;
+        }
+        // CONFIG_RUST silently drops to n when Kconfig cannot detect the
+        // toolchain; verify it stuck rather than reporting bogus coverage.
+        let cfg = std::fs::read_to_string(Path::new(&self.kernel_src).join(".config"))
+            .unwrap_or_default();
+        if !cfg.contains("CONFIG_SAMPLE_RUST_MISC_DEVICE=y") {
+            self.log("SKIP", "CONFIG_SAMPLE_RUST_MISC_DEVICE did not take (Kconfig dropped RUST)");
+            return true;
+        }
+        self.log("PASS", "kernel configured + built (RUST + rust_misc_device built-in)");
+
+        let vmlinux = self.vmlinux.clone();
+        let ks = self.kernel_src.clone();
+        let vb = self.vock_bin.clone();
+        let ksdir = Path::new(&ks).to_path_buf();
+        for f in ["kerncov.log", "srccov.log", "asmcov.log", "coverage.html"] {
+            let _ = std::fs::remove_file(ksdir.join(f));
+        }
+
+        println!("\n[Test 5.1: --mode kcov, write() into the Rust misc device]");
+        let mut cmd = sv(&[&vb, "--mode", "kcov", "--vmlinux", &vmlinux, "--kernel-src", &ks, &vb]);
+        cmd.extend(RUST_TARGET_ARGS.iter().map(|s| s.to_string()));
+        let r = self.vng_run(&cmd);
+        self.vlog_full(&r);
+        if r.stdout_str().contains("rust-touch: write=") {
+            self.log("PASS", "userspace write()/read()/ioctl() into the Rust device succeeded");
+        } else {
+            self.log("FAIL", "rust-touch target did not run (no /dev/rust-misc-device?)");
+        }
+
+        let srccov = std::fs::read_to_string(ksdir.join("srccov.log")).unwrap_or_default();
+        let rs_lines = srccov.lines().filter(|l| l.contains(".rs:")).count();
+        if rs_lines > 0 {
+            self.log("PASS", &format!("KCOV instruments Rust: {rs_lines} PCs resolved to .rs source"));
+        } else {
+            self.log("FAIL", "no .rs source lines in coverage (Rust not instrumented?)");
+        }
+        if srccov.contains("write_iter") {
+            self.log("PASS", "write path covered: write_iter of the Rust device in coverage");
+        } else {
+            self.log("FAIL", "write_iter not in coverage despite a successful write()");
+        }
+        let html = std::fs::read_to_string(ksdir.join("coverage.html")).unwrap_or_default();
+        // The traced fops are generic wrappers from rust/kernel/miscdevice.rs
+        // instantiated for the sample, so the report shows the sample via the
+        // instantiated names (<...<rust_misc_device::RustMiscDevice>>::...)
+        // and, when the impl is not fully inlined, the sample file itself.
+        if html.contains("rust_misc_device") {
+            self.log("PASS", "coverage.html shows the Rust sample (instantiated generics/source)");
+        } else {
+            self.log("FAIL", "coverage.html lacks the Rust sample");
+        }
+        // Show real .rs evidence under the verdicts, in both symbol forms:
+        // the original v0-mangled name (what kallsyms/nm show) and the
+        // demangled one the report uses. addr2line runs twice on the same
+        // PCs, once without -C for the originals.
+        let rs_addrs: Vec<String> = srccov
+            .lines()
+            .filter(|l| l.contains(".rs:"))
+            .filter_map(|l| l.split_whitespace().next().map(String::from))
+            .take(3)
+            .collect();
+        let mangled = addr2line_funcs(&vmlinux, &rs_addrs, false);
+        let demangled = addr2line_funcs(&vmlinux, &rs_addrs, true);
+        let mut v0 = false;
+        for (i, a) in rs_addrs.iter().enumerate() {
+            let m = mangled.get(i).map(String::as_str).unwrap_or("?");
+            let d = demangled.get(i).map(String::as_str).unwrap_or("?");
+            let dt: String = d.chars().take(80).collect();
+            println!("      \u{00b7} {a} original:  {m}");
+            println!("      \u{00b7} {a} demangled: {dt}");
+            if m.starts_with("_R") {
+                v0 = true;
+            }
+        }
+        if v0 {
+            self.log("PASS", "Rust symbols reported in both forms (v0 mangled + demangled)");
+        } else if !rs_addrs.is_empty() {
+            self.log("SKIP", "no v0-mangled originals among the sampled Rust PCs");
+        }
+
+        // 5.2: hardware engine, guest side (IP-sampling fallback there) -
+        // statistical, so finding .rs lines is a bonus, not a requirement.
+        // On this host the only shipped Rust module (ax88796b_rust) needs
+        // its PHY hardware, so a host pass cannot reach Rust code.
+        println!("\n[Test 5.2: --mode hw (guest, statistical) touching the Rust device]");
+        for f in ["kerncov.log", "srccov.log"] {
+            let _ = std::fs::remove_file(ksdir.join(f));
+        }
+        let mut cmd = sv(&[&vb, "--mode", "hw", "--vmlinux", &vmlinux, "--kernel-src", &ks, &vb]);
+        cmd.extend(RUST_TARGET_ARGS.iter().map(|s| s.to_string()));
+        let r = self.vng_run(&cmd);
+        self.vlog(&r, false);
+        let srccov = std::fs::read_to_string(ksdir.join("srccov.log")).unwrap_or_default();
+        let rs_hw = srccov.lines().filter(|l| l.contains(".rs:")).count();
+        if rs_hw > 0 {
+            self.log("PASS", &format!("hw sampling caught {rs_hw} Rust PCs (bonus)"));
+        } else {
+            self.log("SKIP", "hw sampling caught no Rust PCs (expected: statistical, guest fallback)");
         }
         true
     }
@@ -983,6 +1181,30 @@ dmesg 2>/dev/null | grep -iaE 'KASAN|use-after-free|slab-out-of-bounds|BUG:' | h
     }
 }
 
+/// Resolve function names for `addrs` against `vmlinux` via addr2line -f,
+/// demangled or not. Used by the Rust selftest to show both symbol forms.
+fn addr2line_funcs(vmlinux: &str, addrs: &[String], demangle: bool) -> Vec<String> {
+    if addrs.is_empty() {
+        return Vec::new();
+    }
+    let mut c = Command::new("addr2line");
+    c.arg("-f");
+    if demangle {
+        c.arg("-C");
+    }
+    c.arg("-e").arg(vmlinux);
+    c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let Ok(mut child) = c.spawn() else { return Vec::new() };
+    if let Some(mut si) = child.stdin.take() {
+        use std::io::Write;
+        let _ = si.write_all(addrs.join("\n").as_bytes());
+    }
+    let Ok(out) = child.wait_with_output() else { return Vec::new() };
+    let s = String::from_utf8_lossy(&out.stdout);
+    // -f output alternates function / location; keep the function lines.
+    s.lines().step_by(2).map(|l| l.to_string()).collect()
+}
+
 /// Extract the token following `key` up to whitespace.
 fn field(out: &str, key: &str) -> Option<String> {
     let idx = out.find(key)? + key.len();
@@ -1045,7 +1267,7 @@ pub fn main(args: &[String]) -> i32 {
             }
             "-v" | "--verbose" => verbose = true,
             "--no-build" => no_build = true,
-            t @ ("1" | "2" | "3" | "4") => test = Some(t.to_string()),
+            t @ ("1" | "2" | "3" | "4" | "5") => test = Some(t.to_string()),
             other => {
                 eprintln!("vock selftest: unrecognized argument '{other}'");
                 print_help();
@@ -1166,11 +1388,15 @@ pub fn main(args: &[String]) -> i32 {
         Some("4") => {
             h.test_fuzz_kasan();
         }
+        Some("5") => {
+            h.test_rust_module();
+        }
         _ => {
             h.test_coverage();
             h.test_hw();
             h.test_crypto_filter();
             h.test_fuzz_kasan();
+            h.test_rust_module();
         }
     }
 
@@ -1219,7 +1445,7 @@ fn shellexpand_home(p: &str, home: &str) -> String {
 fn print_help() {
     eprint!(
         "usage: vock selftest [-h] [--on {{host,vng-kvm,vng-tcg}}] [--kernel-src PATH]\n\
-                     [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-4]\n\n\
+                     [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-5]\n\n\
 tests:\n\
   1  coverage + syscall  build a KCOV kernel; exercise every KCOV collection and\n\
                          reporting feature: KCOV+vmlinux and KCOV+BTF across each\n\
@@ -1230,7 +1456,10 @@ tests:\n\
                          Intel PT / CoreSight need --on host\n\
   3  filter + crypto     --filter narrowed xts(aes) decrypt coverage + verify\n\
   4  kasan bug hunt      build a KASAN+KCOV kernel; loop a sample reproducer\n\
-                         (MIDI UAF) for <=30 min, watching for a KASAN report\n\n\
+                         (MIDI UAF) for <=30 min, watching for a KASAN report\n\
+  5  rust module         build a KCOV kernel with CONFIG_RUST and the built-in\n\
+                         rust_misc_device sample; write() into it from userspace\n\
+                         and assert .rs source lines appear in the coverage\n\n\
 options:\n\
   --no-build  do not re-run make; use the existing ./vock.bin. Needed when\n\
               cargo is not on PATH, e.g. under sudo (secure_path).\n\n\

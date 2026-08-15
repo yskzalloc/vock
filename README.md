@@ -13,7 +13,11 @@ vock is written in Rust — a full port of the original C/Python, with no C
 remaining and `libc` as the only crate dependency. `make` produces `./vock.bin`
 and the `mode/kcov.so` LD_PRELOAD coverage shim.
 
-**Status.** All four selftests pass on x86_64. `selftest 1` (KCOV) covers
+**Status.** All selftests pass on x86_64, including Rust-for-Linux
+coverage: selftest 5 traces a userspace write() into the built-in
+`rust_misc_device` sample and verifies `.rs` source lines (the sample's
+`write_iter` included) in the resolved coverage, with Rust symbols reported
+in both v0-mangled and demangled form. `selftest 1` (KCOV) covers
 KCOV+vmlinux and KCOV+BTF across all three syscall backends (`ptrace`, `sud`,
 `ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 3`
 (crypto) passes; `selftest 4` reproduces a real KASAN use-after-free from the
@@ -396,14 +400,15 @@ syz-trace2syz -file trace.syz
 
 ## Selftest
 
-Four tests (see [SELFTEST.md](SELFTEST.md) for details):
+Five tests (see [SELFTEST.md](SELFTEST.md) for details):
 
 ```bash
 ./vock.bin selftest 1 --on vng-kvm       # KCOV + all syscall engines + reporting (VM)
 sudo ./vock.bin selftest 2 --on host     # HW trace, auto-selected for the host CPU
 ./vock.bin selftest 3 --on vng-kvm       # --filter + xts(aes) crypto coverage (VM)
 ./vock.bin selftest 4 --on vng-kvm       # KASAN bug hunt: loop a sample repro ≤30 min
-./vock.bin selftest      --on vng-kvm    # all four
+./vock.bin selftest 5 --on vng-kvm       # Rust-for-Linux module coverage (KCOV + write path)
+./vock.bin selftest      --on vng-kvm    # all five
 ./vock.bin selftest --help               # all options
 ```
 
@@ -424,6 +429,10 @@ granted the full test passes (verified 26/26 on an AMD Ryzen, host ebpf
 included). Re-apply `setcap` after every rebuild — writing the binary drops
 file capabilities.
 
+All artifacts are written to the working directory by default; pass
+`-d <dir>` (`--output-dir`) to place them in a directory instead, which is
+created if missing — this also applies to `vock report`.
+
 ## Output Files
 
 | File | Description |
@@ -435,13 +444,29 @@ file capabilities.
 | `kerncov_prog1.<N>` | Per-call coverage from `execprog -cover` |
 | `kerncov_prog1.extra` | Background coverage belonging to no single call |
 | `coverage.html` | Source-annotated coverage report (C source only) |
-| `asmcov.log` | PCs that resolved to assembly (`.S`), split out of the report |
+| `srccov.log` | Source-line twin of `kerncov.log`: `0x<pc> <function> <file>:<line>`, same order |
+| `srccov-local-<TID>.log` | Source-line twin of a per-TID ordered log |
+| `asmcov.log` | Assembly PCs split out of the report: `0x<pc> <function> <file>:<line>: <asm text>` |
 | `coverage-<TID>.html` | Per-thread ordered trace from `--mode kcov --ordered` |
 | `trace.log` | Strace-format syscall log |
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
 
-All coverage logs carry `PreviousInstructionPC`-shifted PCs, syzkaller's
-convention — see [FUZZ.md](FUZZ.md) → *PC convention*.
+All raw coverage logs carry `PreviousInstructionPC`-shifted PCs, syzkaller's
+convention — see [FUZZ.md](FUZZ.md) → *PC convention*. `kerncov.log` stays in
+that raw machine format (its addresses are per-boot KASLR values and it
+remains valid `vock report --log` input); the `srccov`/`asmcov` twins are the
+human-readable transform of the same data, produced by the report's
+symbolize layer.
+
+The report format is **engine-transparent**: KCOV and `--mode hw` PCs flow
+through the same pipeline, so `coverage.html`, the terminal excerpts and the
+`srccov`/`asmcov` twins look identical regardless of the engine. Excerpts
+use kernel-patch conventions: three lines of context before and after each
+covered line (`-A`/`-B` override) and a `... @@ <function>` hunk header, so
+a report reads like a diff. `asmcov.log` appears whenever PCs resolve to
+assembly; under KCOV it is normally absent by nature — KCOV is compiler
+instrumentation and `.S` files are not instrumented, so no assembly PC can
+ever be observed by that engine.
 
 ## Build
 

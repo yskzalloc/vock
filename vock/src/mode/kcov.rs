@@ -9,7 +9,7 @@ use crate::report;
 use libc::c_void;
 use std::io::Write;
 
-const COVER_SZ: usize = 64 << 10;
+const COVER_SZ: usize = 2 << 20; // match the shim buffer (16 MiB map)
 const KCOV_INIT_TRACE: libc::c_ulong = 0x8008_6301;
 const KCOV_DISABLE: libc::c_ulong = 0x6365;
 const KCOV_REMOTE_ENABLE: libc::c_ulong = 0x4018_6366;
@@ -98,7 +98,7 @@ fn ctx(v: i32) -> i32 {
     if v >= 0 {
         v
     } else {
-        4
+        3 // kernel-patch-style default context
     }
 }
 

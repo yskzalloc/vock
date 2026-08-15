@@ -10,8 +10,10 @@ fn esc(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn generate(
     cov: &BTreeMap<String, BTreeSet<usize>>,
+    funcs: &BTreeMap<String, BTreeMap<usize, String>>,
     kernel_src: &str,
     before: i32,
     after: i32,
@@ -59,10 +61,25 @@ pub fn generate(
             }
         }
 
+        // Kernel-patch-style hunk headers, as in the terminal report.
+        let ffuncs = funcs.get(fpath);
         let mut last: i64 = -1;
         for &ln in &show {
             if ln as i64 != last + 1 {
-                body.push_str("<span class=\"sep\">   ...</span>\n");
+                let func = ffuncs.and_then(|m| {
+                    covered
+                        .range(ln..)
+                        .next()
+                        .and_then(|c| m.get(c))
+                        .map(String::as_str)
+                });
+                match func {
+                    Some(f) => body.push_str(&format!(
+                        "<span class=\"sep\">   ... @@ {}</span>\n",
+                        esc(f)
+                    )),
+                    None => body.push_str("<span class=\"sep\">   ...</span>\n"),
+                }
             }
             let text = if ln <= all_lines.len() {
                 esc(all_lines[ln - 1])
