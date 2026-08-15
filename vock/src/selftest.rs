@@ -4,8 +4,9 @@
 //!   1  Coverage + Syscall + Syzlang (vng)  — exercises every KCOV collection
 //!      and reporting feature: KCOV+vmlinux and KCOV+BTF, across each
 //!      `--syscall` backend, with `--syzlang`, plus the `--ordered` report.
-//!   2  HW trace (host)                      — detects the host CPU and runs
+//!   2  HW trace (host; AMD LBR also vng)    — detects the host CPU and runs
 //!      the matching engine: Intel PT / AMD LBR (x86_64) or CoreSight (arm64).
+//!      LBR virtualizes on Zen, so `--on vng-kvm` runs it inside the guest.
 //!   3  Filter + xts(aes) Crypto (vng)       — `--filter` narrowed crypto
 //!      coverage of an xts(aes) decrypt, with plaintext verification.
 //!   4  KASAN bug hunt (vng)                 — builds a KASAN+KCOV kernel and
@@ -16,9 +17,12 @@
 //! required whenever cargo is not on PATH — notably under `sudo`, where
 //! sudoers' `secure_path` drops `~/.cargo/bin`.
 
+mod target;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use target::{help_raw_commands, COVERAGE_TARGET, CRYPTO_TARGET_ARGS, KASAN_SAMPLE, SUD_SETUP};
 
 // ─── command runner with timeout ────────────────────────────────────────────
 
@@ -232,8 +236,6 @@ fn kvm_available() -> bool {
 
 // ─── the harness ────────────────────────────────────────────────────────────
 
-const SUD_SETUP: &str = "echo 0 > /proc/sys/vm/mmap_min_addr 2>/dev/null; ";
-
 struct Harness {
     pass: u32,
     fail: u32,
@@ -244,6 +246,7 @@ struct Harness {
     kernel_src: String,
     vmlinux: String,
     vock_dir: String,
+    vock_bin: String,
     arch: ArchInfo,
 }
 
@@ -265,18 +268,31 @@ impl Harness {
     }
 
     fn vlog(&self, r: &Out, force: bool) {
+        self.vlog_n(r, force, 20, 10);
+    }
+
+    /// Verbose log with the full command output — used for the HW-trace and
+    /// crypto runs, whose annotated source-excerpt reports (📄 file → covered
+    /// lines) are the interesting part and small enough to show whole. Test 1
+    /// keeps the compact tail: it runs vock eight times and an unfiltered
+    /// report is tens of thousands of lines.
+    fn vlog_full(&self, r: &Out) {
+        self.vlog_n(r, false, usize::MAX, usize::MAX);
+    }
+
+    fn vlog_n(&self, r: &Out, force: bool, out_lines: usize, err_lines: usize) {
         if !self.verbose && !force {
             return;
         }
         let out = r.stdout_str();
         let err = String::from_utf8_lossy(&r.stderr).into_owned();
         if !out.is_empty() {
-            for line in out.trim().lines().rev().take(20).collect::<Vec<_>>().iter().rev() {
+            for line in out.trim().lines().rev().take(out_lines).collect::<Vec<_>>().iter().rev() {
                 println!("    | {line}");
             }
         }
         if !err.is_empty() {
-            for line in err.trim().lines().rev().take(10).collect::<Vec<_>>().iter().rev() {
+            for line in err.trim().lines().rev().take(err_lines).collect::<Vec<_>>().iter().rev() {
                 println!("    ! {line}");
             }
         }
@@ -288,7 +304,13 @@ impl Harness {
             return true;
         }
         println!("  Configuring + building kernel...");
-        let mut cmd = vec!["vng".to_string()];
+        // Without --force, vng passes --no-update to virtme-configkernel, which
+        // is a no-op whenever a .config already exists — the --configitem list
+        // below would silently never apply (stale config from a previous test
+        // or an earlier run wins). --force only forces the config override
+        // here; the git-reset branch of vng's --force needs --commit, which we
+        // never pass.
+        let mut cmd = vec!["vng".to_string(), "--force".to_string()];
         for (k, en) in configs {
             cmd.push("--configitem".into());
             cmd.push(format!("{k}={}", if *en { "y" } else { "n" }));
@@ -309,10 +331,20 @@ impl Harness {
 
     /// Like `vng_run`, with an explicit timeout (e.g. the 30-min bug hunt).
     fn vng_run_to(&self, cmd: &[String], timeout: Duration) -> Out {
-        if self.run_target == "host" {
+        self.exec_to(self.run_target == "host", cmd, timeout)
+    }
+
+    /// Run `cmd` on an explicit side: directly on the host, or inside the
+    /// vng guest regardless of --on. Lets one test drive both (test 2 runs
+    /// AMD LBR on the host and in the KVM guest in a single invocation).
+    fn exec_to(&self, on_host: bool, cmd: &[String], timeout: Duration) -> Out {
+        if on_host {
             return run(cmd, Some(&self.kernel_src), timeout);
         }
-        let mut vng = sv(&["vng", "--rw"]);
+        // 2G: the report step runs addr2line over the DWARF5 vmlinux inside
+        // the guest, which peaks around 1 GiB RSS — vng's default 1G guest
+        // OOM-kills it mid-resolution and the coverage silently loses files.
+        let mut vng = sv(&["vng", "--rw", "--memory", "2G"]);
         if self.run_target == "vng-tcg" {
             vng.push("--disable-kvm".into());
         }
@@ -359,7 +391,8 @@ impl Harness {
         self.log("PASS", "kernel configured + built");
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
-        let vd = self.vock_dir.clone();
+        let vb = self.vock_bin.clone();
+        let tgt = COVERAGE_TARGET;
 
         println!("\n── Group A: KCOV + vmlinux + syzlang ──");
         let diag = self.vng_run(&sv(&[
@@ -374,7 +407,7 @@ impl Harness {
             println!("\n[Test: --mode kcov --syzlang --syscall {backend} --vmlinux]");
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             let script = format!(
-                "rm -f kerncov.log coverage.html trace.log trace.syz local-*.log remote-*.log && {sud_pre}{vd}/vock.bin --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} /bin/ls /tmp 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
+                "rm -f kerncov.log coverage.html trace.log trace.syz local-*.log remote-*.log && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
             );
             let r = self.vng_run(&sv(&["bash", "-c", &script]));
             self.vlog(&r, false);
@@ -386,7 +419,7 @@ impl Harness {
             println!("\n[Test: --mode kcov --syzlang --syscall {backend} --btf --kernel-src]");
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             let script = format!(
-                "rm -f kerncov.log coverage.html trace.log trace.syz && {sud_pre}{vd}/vock.bin --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} /bin/ls /tmp 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
+                "rm -f kerncov.log coverage.html trace.log trace.syz && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK"
             );
             let r = self.vng_run(&sv(&["bash", "-c", &script]));
             self.vlog(&r, false);
@@ -398,7 +431,7 @@ impl Harness {
         println!("\n── Group C: KCOV reporting (--ordered, --filter) ──");
         println!("\n[Test: --mode kcov --ordered --vmlinux]");
         let script = format!(
-            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vd}/vock.bin --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} /bin/ls /tmp 2>&1; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l)"
+            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l)"
         );
         let r = self.vng_run(&sv(&["bash", "-c", &script]));
         self.vlog(&r, false);
@@ -412,7 +445,7 @@ impl Harness {
 
         println!("\n[Test: --mode kcov --filter fs --vmlinux]");
         let script = format!(
-            "rm -f kerncov.log coverage.html && {vd}/vock.bin --mode kcov --filter fs --vmlinux {vmlinux} --kernel-src {ks} /bin/ls /tmp 2>&1 >/dev/null; [ -f coverage.html ] && echo HTML_OK && grep -qE 'fs/' coverage.html && echo FILTER_OK"
+            "rm -f kerncov.log coverage.html && {vb} --mode kcov --filter fs --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -f coverage.html ] && echo HTML_OK && grep -qE 'fs/' coverage.html && echo FILTER_OK"
         );
         let r = self.vng_run(&sv(&["bash", "-c", &script]));
         self.vlog(&r, false);
@@ -430,7 +463,15 @@ impl Harness {
     /// Shared PASS/FAIL evaluation for the coverage + syscall groups.
     fn eval_cov_syscall(&mut self, r: &Out, label: &str) {
         let out = r.stdout_str();
-        if out.contains("ebpf backend not built") {
+        if out.contains("SUD (SYSCALL_USER_DISPATCH) not supported") {
+            self.log("SKIP", &format!("{label}: SUD not supported by this kernel/arch (needs SYSCALL_USER_DISPATCH; arm64 needs GENERIC_ENTRY)"));
+            return;
+        }
+        if out.contains("tracefs not readable") {
+            self.log("SKIP", &format!("{label}: tracefs not readable; try: sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing (or root)"));
+        } else if out.contains("bpf() returned EPERM") {
+            self.log("SKIP", &format!("{label}: unprivileged BPF disabled; try: sudo sysctl kernel.unprivileged_bpf_disabled=0 (tracepoint attach also needs CAP_BPF+CAP_PERFMON or root)"));
+        } else if out.contains("ebpf backend not built") {
             self.log("SKIP", &format!("{label}: ebpf not built"));
         } else if let Some(pcs) = field(&out, "KCOV_PCS=") {
             if pcs.parse::<i64>().unwrap_or(0) > 0 {
@@ -491,7 +532,9 @@ impl Harness {
             return true;
         };
 
-        // Intel PT is unavailable inside KVM guests.
+        // Intel PT is unavailable inside KVM guests; AMD LBR virtualizes
+        // fine on Zen, so --on vng-kvm is a fully supported way to run the
+        // LBR engine (and what CI uses on AMD runners).
         if hw_type == "Intel PT" && self.run_target != "host" {
             self.log("SKIP", "Intel PT unavailable in KVM guests (use --on host)");
             return true;
@@ -521,39 +564,69 @@ impl Harness {
             return false;
         }
         self.log("PASS", "kernel configured + built");
+
+        // AMD LBR is the one engine that works on both sides of KVM, so a
+        // vng invocation covers both in one run: 2.1 traces the running host
+        // kernel directly (skips cleanly without perf privileges), 2.2 boots
+        // the freshly built kernel in the guest. Intel PT / CoreSight run
+        // only where --on selected.
+        if hw_type == "AMD LBR" && self.run_target != "host" {
+            println!("\n── 2.1: AMD LBR on the host ──");
+            self.hw_backend_suite(true, "host");
+            println!("\n── 2.2: AMD LBR in the {} guest ──", self.run_target);
+            self.hw_backend_suite(false, "guest");
+        } else {
+            self.hw_backend_suite(self.run_target == "host", "");
+        }
+        true
+    }
+
+    /// One full HW-trace backend sweep (ptrace / sud / ebpf), executed on the
+    /// host or in the vng guest. `side` tags the result lines when a test
+    /// runs both.
+    fn hw_backend_suite(&mut self, on_host: bool, side: &str) {
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
-        let vd = self.vock_dir.clone();
-
+        let vb = self.vock_bin.clone();
+        let tgt = COVERAGE_TARGET;
+        let tag = if side.is_empty() { String::new() } else { format!(" ({side})") };
         let perf_pre = "echo -1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || sudo -n sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' 2>/dev/null || true; ";
         for backend in ["ptrace", "sud", "ebpf"] {
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
-            println!("\n[Test: --mode hw --syzlang --syscall {backend} --vmlinux]");
+            println!("\n[Test: --mode hw --syzlang --syscall {backend} --vmlinux{tag}]");
             let script = format!(
-                "rm -f kerncov.log trace.log trace.syz && {perf_pre}{sud_pre}{vd}/vock.bin --mode hw --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} /bin/ls /tmp 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz)"
+                "rm -f kerncov.log trace.log trace.syz && {perf_pre}{sud_pre}{vb} --mode hw --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz)"
             );
-            let r = self.vng_run(&sv(&["bash", "-c", &script]));
-            self.vlog(&r, false);
+            let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
+            self.vlog_full(&r);
             let out = r.stdout_str();
-            if out.contains("ebpf backend not built") {
-                self.log("SKIP", &format!("hw+{backend}: ebpf not built"));
+            if out.contains("SUD (SYSCALL_USER_DISPATCH) not supported") {
+                self.log("SKIP", &format!("hw+{backend}{tag}: SUD not supported by this kernel/arch"));
+                continue;
+            }
+            if out.contains("tracefs not readable") {
+                self.log("SKIP", &format!("hw+{backend}{tag}: tracefs not readable; try: sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing (or root)"));
+            } else if out.contains("bpf() returned EPERM") {
+                self.log("SKIP", &format!("hw+{backend}{tag}: unprivileged BPF disabled; try: sudo sysctl kernel.unprivileged_bpf_disabled=0 (tracepoint attach also needs CAP_BPF+CAP_PERFMON or root)"));
+            } else if out.contains("ebpf backend not built") {
+                self.log("SKIP", &format!("hw+{backend}{tag}: ebpf not built"));
             } else if out.contains("requires privileges")
                 || out.contains("no hardware trace PMU")
                 || out.contains("start failed")
                 || out.contains("perf_event_open")
             {
-                self.log("SKIP", &format!("hw+{backend}: perf unavailable (nested VM or insufficient privileges)"));
+                self.log("SKIP", &format!("hw+{backend}{tag}: perf unavailable (nested VM or insufficient privileges)"));
             } else if let Some(pcs) = field(&out, "KCOV_PCS=") {
                 if pcs.parse::<i64>().unwrap_or(0) > 0 {
-                    self.log("PASS", &format!("hw+{backend}+vmlinux: {pcs} PCs"));
+                    self.log("PASS", &format!("hw+{backend}+vmlinux{tag}: {pcs} PCs"));
                 } else if out.contains("0 kernel PCs sampled") {
-                    self.log("SKIP", &format!("hw+{backend}+vmlinux: 0 PCs (LBR not available in nested VM)"));
+                    self.log("SKIP", &format!("hw+{backend}+vmlinux{tag}: 0 PCs (LBR not available in nested VM)"));
                 } else {
-                    self.log("FAIL", &format!("hw+{backend}+vmlinux: no coverage"));
+                    self.log("FAIL", &format!("hw+{backend}+vmlinux{tag}: no coverage"));
                     self.vlog(&r, true);
                 }
             } else {
-                self.log("FAIL", &format!("hw+{backend}+vmlinux: failed"));
+                self.log("FAIL", &format!("hw+{backend}+vmlinux{tag}: failed"));
                 self.vlog(&r, true);
             }
             if let Some(v) = field(&out, "TRACE_OK=") {
@@ -566,10 +639,14 @@ impl Harness {
                 self.log("PASS", &format!("  trace.syz: {v} syscalls"));
             }
         }
-        true
     }
 
     // ── Test 3: --filter + xts(aes) crypto decrypt coverage ─────────────────
+    //
+    // The workload is vock itself (`vock selftest target crypto-*`, AF_ALG in
+    // Rust — see selftest/target.rs), staged in the kernel tree which vng
+    // shares with the host, so every check below reads files directly instead
+    // of parsing shell markers out of guest stdout.
     fn test_crypto_filter(&mut self) -> bool {
         println!("\n{}", "=".repeat(60));
         println!("  TEST 3: Filter + xts(aes) Crypto (kcov + --filter + decrypt verify)");
@@ -600,49 +677,65 @@ impl Harness {
         self.log("PASS", "kernel configured + built");
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
-        let vd = self.vock_dir.clone();
+        let vb = self.vock_bin.clone();
+        let ksdir = Path::new(&ks).to_path_buf();
+
+        // Stage plaintext/key/ciphertext host-side (AF_ALG on the host
+        // kernel) directly into the shared tree; the guest only decrypts.
+        for f in ["kerncov.log", "coverage.html"] {
+            let _ = std::fs::remove_file(ksdir.join(f));
+        }
+        if let Err(e) = target::crypto_setup(&ksdir) {
+            self.log("FAIL", &format!("crypto setup (host AF_ALG): {e}"));
+            return false;
+        }
+        self.log("PASS", "xts(aes) workload staged (AF_ALG encrypt on host)");
 
         println!("\n[Test: --mode kcov --filter crypto --vmlinux (xts(aes) decrypt)]");
-        let script = format!(
-            "rm -f kerncov.log coverage.html && {setup} && {decrypt} && {vd}/vock.bin --mode kcov --filter crypto --vmlinux {vmlinux} --kernel-src {ks} /bin/sh /tmp/dec.sh 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -f coverage.html ] && echo HTML_OK && grep -ic 'aes\\|xts\\|crypto\\|skcipher' coverage.html && echo CRYPTO_FOUND && cmp /tmp/block.img /tmp/block.dec 2>/dev/null && echo DECRYPT_OK",
-            setup = crypto_setup_cmds(),
-            decrypt = crypto_decrypt_script()
-        );
-        let r = self.vng_run(&sv(&["bash", "-c", &script]));
-        self.vlog(&r, false);
-        let out = r.stdout_str();
-
-        if let Some(pcs) = field(&out, "KCOV_PCS=") {
-            if pcs.parse::<i64>().unwrap_or(0) > 0 {
-                self.log("PASS", &format!("--mode kcov + --filter crypto: {pcs} kernel PCs from xts(aes) decrypt"));
-            } else {
-                self.log("FAIL", "--mode kcov: no coverage from decrypt");
-            }
-        } else {
-            self.log("FAIL", "crypto test: command failed");
-            if !out.is_empty() {
-                println!("    {}", &out[..out.len().min(400)]);
-            }
+        let mut cmd = sv(&[
+            &vb, "--mode", "kcov", "--filter", "crypto",
+            "--vmlinux", &vmlinux, "--kernel-src", &ks, &vb,
+        ]);
+        cmd.extend(CRYPTO_TARGET_ARGS.iter().map(|s| s.to_string()));
+        let r = self.vng_run(&cmd);
+        self.vlog_full(&r);
+        if r.code == -1 {
+            self.log("FAIL", "crypto test: VM run died (boot failure or timeout)");
+            self.vlog(&r, true);
         }
-        if out.contains("HTML_OK") {
+
+        let pcs = std::fs::read_to_string(ksdir.join("kerncov.log"))
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        if pcs > 0 {
+            self.log("PASS", &format!("--mode kcov + --filter crypto: {pcs} kernel PCs from xts(aes) decrypt"));
+        } else {
+            self.log("FAIL", "--mode kcov: no coverage from decrypt");
+        }
+
+        let html = std::fs::read_to_string(ksdir.join("coverage.html")).unwrap_or_default();
+        if !html.is_empty() {
             self.log("PASS", "coverage.html generated");
         } else {
             self.log("FAIL", "coverage.html missing");
         }
-        // The xts(aes) work via AF_ALG is typically completed asynchronously
-        // (cryptd / io-wq worker), i.e. NOT in the traced task's synchronous
-        // syscall context — so per-task KCOV legitimately may not capture the
-        // crypto/ source. Treat its presence as a bonus, not a hard failure;
+        // xts(aes) via AF_ALG may complete asynchronously (cryptd / io-wq
+        // worker), off the traced task's syscall path — per-task KCOV then
+        // legitimately misses the crypto/ source. Bonus, not a hard failure;
         // the decrypt roundtrip below is the real crypto-correctness check.
-        if out.contains("CRYPTO_FOUND") {
+        let lower = html.to_lowercase();
+        if ["aes", "xts", "crypto", "skcipher"].iter().any(|k| lower.contains(k)) {
             self.log("PASS", "--filter crypto: aes/xts/skcipher paths in filtered report");
         } else {
             self.log("SKIP", "--filter crypto: crypto offloaded (async); not captured by per-task KCOV");
         }
-        if out.contains("DECRYPT_OK") {
+        if target::crypto_verify(&ksdir) {
             self.log("PASS", "decrypt verified: plaintext matches original (crypto subsystem exercised)");
         } else {
             self.log("SKIP", "decrypt verification skipped (async completion / contended run)");
+        }
+        for f in target::CRYPTO_FILES {
+            let _ = std::fs::remove_file(ksdir.join(f));
         }
         true
     }
@@ -653,7 +746,7 @@ impl Harness {
         println!("  TEST 4: KASAN bug hunt (sample reproducer on a KCOV kernel, ≤30 min)");
         println!("{}", "=".repeat(60));
 
-        let sample = format!("{}/selftest/samples/midi_uaf.syz", self.vock_dir);
+        let sample = format!("{}/{KASAN_SAMPLE}", self.vock_dir);
         if !Path::new(&sample).is_file() {
             self.log("FAIL", &format!("sample reproducer missing: {sample}"));
             return false;
@@ -719,7 +812,7 @@ impl Harness {
         if uses_pseudo {
             self.log("PASS", "reproducer drives USB raw-gadget via pseudo-syscalls (syz_usb_connect/control_io/disconnect)");
         }
-        let vd = self.vock_dir.clone();
+        let vb = self.vock_bin.clone();
 
         // Loop the reproducer for up to ~30 min, watching dmesg for a KASAN
         // report. panic_on_warn is off so the guest keeps running until the
@@ -731,7 +824,7 @@ impl Harness {
         // cap. dummy_hcd/raw_gadget are built-in (=y) but modprobe is harmless.
         let script = format!(
             "modprobe dummy_hcd 2>/dev/null; modprobe raw_gadget 2>/dev/null; \
-rm -f kerncov.log; ({vd}/vock.bin execprog -repeat=0 -procs=4 {sample} >/tmp/exec.out 2>&1 &) ; \
+rm -f kerncov.log; ({vb} execprog -repeat=0 -procs=4 {sample} >/tmp/exec.out 2>&1 &) ; \
 end=$(( $(cut -d. -f1 /proc/uptime) + {hunt_secs} )); \
 while [ $(cut -d. -f1 /proc/uptime) -lt $end ]; do \
   if dmesg 2>/dev/null | grep -iaqE 'KASAN|use-after-free|slab-out-of-bounds'; then break; fi; \
@@ -757,31 +850,6 @@ dmesg 2>/dev/null | grep -iaE 'KASAN|use-after-free|slab-out-of-bounds|BUG:' | h
     }
 }
 
-// ─── crypto helper command strings ──────────────────────────────────────────
-
-fn crypto_setup_cmds() -> String {
-    let cipher = "xts(aes)";
-    let bs = "64K";
-    let count = 64;
-    let key = "ThisIsA64ByteSecretKeyForAES256XTSModeWhichRequires512BitsOfData";
-    let iv = "00000000000000000000000000000000";
-    format!(
-        "dd if=/dev/urandom of=/tmp/block.img bs={bs} count={count} 2>/dev/null; \
-printf '{key}' > /tmp/key.bin; \
-kcapi-enc -c '{cipher}' -e -i /tmp/block.img -o /tmp/block.enc --iv {iv} --keyfd 3 3</tmp/key.bin 2>/dev/null; \
-printf '#!/bin/sh\\nkcapi-enc -d -c \"{cipher}\" -i /tmp/block.enc -o /tmp/block.dec --iv {iv} --keyfd 3 3</tmp/key.bin\\n' > /tmp/dec.sh; \
-chmod +x /tmp/dec.sh; true"
-    )
-}
-
-fn crypto_decrypt_script() -> String {
-    let cipher = "xts(aes)";
-    let iv = "00000000000000000000000000000000";
-    format!(
-        "printf '#!/bin/sh\\nkcapi-enc -d -c \"{cipher}\" -i /tmp/block.enc -o /tmp/block.dec --iv {iv} --keyfd 3 3</tmp/key.bin\\n' > /tmp/dec.sh && chmod +x /tmp/dec.sh"
-    )
-}
-
 /// Extract the token following `key` up to whitespace.
 fn field(out: &str, key: &str) -> Option<String> {
     let idx = out.find(key)? + key.len();
@@ -791,6 +859,26 @@ fn field(out: &str, key: &str) -> Option<String> {
 // ─── entry point ────────────────────────────────────────────────────────────
 
 pub fn main(args: &[String]) -> i32 {
+    // `vock selftest target <name>` — the in-VM workload halves (e.g. the
+    // AF_ALG crypto setup/decrypt), not the harness itself.
+    if args.first().map(String::as_str) == Some("target") {
+        return target::run_target(&args[1..]);
+    }
+    // `vock selftest raw <n>` — print the reproducible raw command for test
+    // n, the same text --help shows. CI embeds it in the job summary.
+    if args.first().map(String::as_str) == Some("raw") {
+        return match args.get(1).and_then(|n| target::raw_command(n)) {
+            Some(cmd) => {
+                println!("{cmd}");
+                0
+            }
+            None => {
+                eprintln!("vock selftest raw: expected a test number 1-4");
+                2
+            }
+        };
+    }
+
     let mut test: Option<String> = None;
     let mut on = "vng-kvm".to_string();
     let mut kernel_src_arg: Option<String> = None;
@@ -841,6 +929,13 @@ pub fn main(args: &[String]) -> i32 {
         None => format!("{kernel_src}/vmlinux"),
     };
     let vock_dir = crate::util::exe_dir().to_string_lossy().into_owned();
+    // Spawn the same binary that is running this selftest — ./vock.bin in a
+    // build tree, /usr/bin/vock when installed — instead of assuming a
+    // build-tree layout. `make` below overwrites the file in place, so a
+    // rebuilt binary is what later spawns pick up.
+    let vock_bin = std::env::current_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| format!("{vock_dir}/vock.bin"));
 
     let llvm_suffix = if let Some(l) = llvm_arg {
         l
@@ -876,7 +971,7 @@ pub fn main(args: &[String]) -> i32 {
     // selftest run against an installed vock, where there is no source tree.
     println!("\n[Build vock]");
     if no_build {
-        println!("  skipped (--no-build); using {vock_dir}/vock.bin as-is");
+        println!("  skipped (--no-build); using {vock_bin} as-is");
     } else {
         let cc = if llvm_suffix.contains('/') {
             format!("{}/clang", shellexpand_home(&llvm_suffix, &home))
@@ -921,6 +1016,7 @@ pub fn main(args: &[String]) -> i32 {
         kernel_src,
         vmlinux,
         vock_dir,
+        vock_bin,
         arch,
     };
 
@@ -996,7 +1092,9 @@ tests:\n\
                          reporting feature: KCOV+vmlinux and KCOV+BTF across each\n\
                          --syscall backend, +--syzlang, +--ordered, +--filter\n\
   2  hw trace            detect the host CPU and run the matching engine:\n\
-                         Intel PT / AMD LBR (x86_64) or CoreSight (arm64), no KCOV\n\
+                         Intel PT / AMD LBR (x86_64) or CoreSight (arm64), no KCOV.\n\
+                         AMD LBR also runs under --on vng-kvm (KVM guest);\n\
+                         Intel PT / CoreSight need --on host\n\
   3  filter + crypto     --filter narrowed xts(aes) decrypt coverage + verify\n\
   4  kasan bug hunt      build a KASAN+KCOV kernel; loop a sample reproducer\n\
                          (MIDI UAF) for <=30 min, watching for a KASAN report\n\n\
@@ -1010,6 +1108,7 @@ options:\n\
 defaults:\n\
   --kernel-src   $HOME/stable\n\
   --on           vng-kvm\n\
-  (no number)    run all tests\n"
+  (no number)    run all tests\n\n{}",
+        help_raw_commands()
     );
 }

@@ -29,6 +29,15 @@ mode/kcov.so: build
 	@mkdir -p mode
 	cp -f $(TARGET_DIR)/libkcov_preload.so mode/kcov.so
 
+# Install as plain `vock` on PATH. The shim goes to one of the locations
+# util.rs probes (/usr/local/lib/vock/kcov.so); the Debian package uses
+# /usr/bin + /usr/lib/vock instead (see debian/rules).
+PREFIX ?= /usr/local
+.PHONY: install
+install: all
+	install -D -m 0755 $(TARGET_DIR)/vock $(DESTDIR)$(PREFIX)/bin/vock
+	install -D -m 0644 $(TARGET_DIR)/libkcov_preload.so $(DESTDIR)$(PREFIX)/lib/vock/kcov.so
+
 .PHONY: clean
 clean:
 	$(CARGO) clean

@@ -34,6 +34,13 @@ pub fn kcov_preload_path() -> PathBuf {
     if build_tree.exists() {
         return build_tree;
     }
+    // PREFIX-relative install (`make install PREFIX=...`): the shim lands in
+    // <prefix>/lib/vock/kcov.so next to <prefix>/bin/vock, wherever the
+    // prefix is (e.g. ~/.local), so probe relative to the binary.
+    let prefix_lib = exe_dir().join("..").join("lib").join("vock").join("kcov.so");
+    if prefix_lib.exists() {
+        return prefix_lib;
+    }
     for c in kcov_preload_system_paths() {
         if c.exists() {
             return c;

@@ -5,10 +5,27 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 /// Run `addr2line -e vmlinux` over the addresses, returning one line each.
+///
+/// The addresses are fed in chunks, one addr2line process per chunk:
+/// addr2line caches every DWARF compilation unit it touches and resolving a
+/// whole run against a DWARF5 vmlinux peaks around 1 GiB RSS — inside a small
+/// VM the OOM killer takes it mid-run and the tail of the coverage silently
+/// disappears. The input is sorted, so consecutive addresses cluster by CU
+/// and the per-chunk re-parsing costs little.
+const ADDR2LINE_CHUNK: usize = 4096;
+
 pub fn run_addr2line(vmlinux: &str, addrs: &[String]) -> Vec<String> {
     if addrs.is_empty() || !Path::new(vmlinux).is_file() {
         return Vec::new();
     }
+    let mut lines = Vec::with_capacity(addrs.len());
+    for chunk in addrs.chunks(ADDR2LINE_CHUNK) {
+        lines.extend(addr2line_batch(vmlinux, chunk));
+    }
+    lines
+}
+
+fn addr2line_batch(vmlinux: &str, addrs: &[String]) -> Vec<String> {
     let mut child = match Command::new("addr2line")
         .arg("-e")
         .arg(vmlinux)
@@ -20,11 +37,22 @@ pub fn run_addr2line(vmlinux: &str, addrs: &[String]) -> Vec<String> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    if let Some(mut stdin) = child.stdin.take() {
+    // Feed stdin from a separate thread while the main thread drains stdout:
+    // writing everything first deadlocks once addr2line has produced a pipe
+    // buffer's worth of output (~64K) and blocks, no longer reading stdin —
+    // any log beyond a few thousand PCs would hang forever.
+    let mut stdin = child.stdin.take();
+    let input = addrs.join("\n");
+    let writer = std::thread::spawn(move || {
         use std::io::Write;
-        let _ = stdin.write_all(addrs.join("\n").as_bytes());
-    }
-    match child.wait_with_output() {
+        if let Some(s) = stdin.as_mut() {
+            let _ = s.write_all(input.as_bytes());
+        }
+        // stdin drops here → EOF for addr2line
+    });
+    let out = child.wait_with_output();
+    let _ = writer.join();
+    match out {
         Ok(o) => {
             let s = String::from_utf8_lossy(&o.stdout);
             let t = s.trim();

@@ -51,6 +51,19 @@ static mut INITIAL_PID: libc::pid_t = 0;
 
 const KCOV_PATH: &[u8] = b"/sys/kernel/debug/kcov\0";
 
+/// Move a freshly opened kcov fd above the range shells hand out. A plain
+/// `open` returns the lowest free fd (3, 4, …), exactly where a target's
+/// `3<file`-style redirection dup2()s to — which would silently replace the
+/// kcov fd and make the exec hook close the target's own file instead.
+unsafe fn raise_fd(fd: c_int) -> c_int {
+    let high = libc::fcntl(fd, libc::F_DUPFD, 700);
+    if high < 0 {
+        return fd;
+    }
+    libc::close(fd);
+    high
+}
+
 unsafe fn map_area(fd: c_int) -> *mut u64 {
     libc::mmap(
         std::ptr::null_mut(),
@@ -70,6 +83,7 @@ unsafe fn kcov_enable() {
     if local_fd < 0 {
         return;
     }
+    let local_fd = raise_fd(local_fd);
 
     if libc::ioctl(local_fd, KCOV_INIT_TRACE, COVER_SZ as libc::c_ulong) != 0 {
         libc::close(local_fd);
@@ -101,6 +115,7 @@ unsafe fn kcov_enable() {
         done(tid);
         return;
     }
+    let remote_fd = raise_fd(remote_fd);
     if libc::ioctl(remote_fd, KCOV_INIT_TRACE, COVER_SZ as libc::c_ulong) != 0 {
         libc::close(remote_fd);
         done(tid);
@@ -235,6 +250,90 @@ pub unsafe extern "C" fn fork() -> libc::pid_t {
 #[no_mangle]
 pub unsafe extern "C" fn vfork() -> libc::pid_t {
     fork()
+}
+
+// ─── exec interception ───────────────────────────────────────────────────────
+//
+// The kernel keeps a task's KCOV attachment across execve (kcov_close only
+// drops the file reference; t->kcov stays set until task exit), while the fds
+// and mappings that could dump or detach it die with the old image. Left
+// alone, the new image's constructor gets -EBUSY from KCOV_ENABLE and the
+// exec'd program collects nothing — a shell target (`/bin/sh script.sh`)
+// therefore loses all of its children's coverage. Dump + detach before the
+// real exec; if the exec fails, re-enable and keep collecting.
+
+unsafe fn kcov_pre_exec() {
+    kcov_disable();
+}
+
+/// # Safety
+/// Interposes libc `execve`.
+#[no_mangle]
+pub unsafe extern "C" fn execve(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> c_int {
+    type RealFn = extern "C" fn(
+        *const libc::c_char,
+        *const *const libc::c_char,
+        *const *const libc::c_char,
+    ) -> c_int;
+    let real: RealFn = std::mem::transmute(real_sym(b"execve\0"));
+    kcov_pre_exec();
+    let ret = real(path, argv, envp);
+    kcov_enable();
+    ret
+}
+
+/// # Safety
+/// Interposes libc `execv`.
+#[no_mangle]
+pub unsafe extern "C" fn execv(
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+) -> c_int {
+    type RealFn = extern "C" fn(*const libc::c_char, *const *const libc::c_char) -> c_int;
+    let real: RealFn = std::mem::transmute(real_sym(b"execv\0"));
+    kcov_pre_exec();
+    let ret = real(path, argv);
+    kcov_enable();
+    ret
+}
+
+/// # Safety
+/// Interposes libc `execvp`.
+#[no_mangle]
+pub unsafe extern "C" fn execvp(
+    file: *const libc::c_char,
+    argv: *const *const libc::c_char,
+) -> c_int {
+    type RealFn = extern "C" fn(*const libc::c_char, *const *const libc::c_char) -> c_int;
+    let real: RealFn = std::mem::transmute(real_sym(b"execvp\0"));
+    kcov_pre_exec();
+    let ret = real(file, argv);
+    kcov_enable();
+    ret
+}
+
+/// # Safety
+/// Interposes libc `execvpe`.
+#[no_mangle]
+pub unsafe extern "C" fn execvpe(
+    file: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+) -> c_int {
+    type RealFn = extern "C" fn(
+        *const libc::c_char,
+        *const *const libc::c_char,
+        *const *const libc::c_char,
+    ) -> c_int;
+    let real: RealFn = std::mem::transmute(real_sym(b"execvpe\0"));
+    kcov_pre_exec();
+    let ret = real(file, argv, envp);
+    kcov_enable();
+    ret
 }
 
 // ─── pthread_create interception ────────────────────────────────────────────

@@ -439,7 +439,10 @@ fn real_main() -> i32 {
     // their own target and run AFTER coverage.
     if syscall_on && syscall_backend == "sud" {
         if !sud::available() {
-            eprintln!("error: SUD requires kernel >= 5.11");
+            // The live prctl probe failed: the kernel lacks
+            // SYSCALL_USER_DISPATCH (needs >= 5.11 and, per arch, generic
+            // entry - arm64 kernels without CONFIG_GENERIC_ENTRY have none).
+            eprintln!("error: SUD (SYSCALL_USER_DISPATCH) not supported by this kernel/arch");
             return 1;
         }
         sud::run(cmd, "trace.log");

@@ -369,6 +369,33 @@ fn not_built() -> i32 {
     -1
 }
 
+/// bpf() failed with EPERM: the backend exists but this user may not call
+/// bpf(2). Say exactly why and how to enable it instead of the generic
+/// "not built" — kernel.unprivileged_bpf_disabled=1/2 blocks the very first
+/// map creation for normal users.
+fn eperm_hint() -> i32 {
+    let v = std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    eprintln!("ebpf backend: bpf() returned EPERM (kernel.unprivileged_bpf_disabled={v})");
+    eprintln!("  as a normal user: sudo sysctl kernel.unprivileged_bpf_disabled=0");
+    eprintln!("  (value 1 is locked until reboot; tracepoint attach additionally");
+    eprintln!("   needs CAP_BPF+CAP_PERFMON, or run vock as root)");
+    -1
+}
+
+/// Distinguish a permissions failure from real unavailability.
+fn bpf_fail() -> i32 {
+    if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        && unsafe { libc::geteuid() } != 0
+    {
+        eperm_hint()
+    } else {
+        not_built()
+    }
+}
+
 /// Trace syscalls via eBPF into `trace_log`. Returns >= 0 on success, -1 on
 /// failure (with `ebpf backend not built` emitted for the SKIP path).
 pub fn run(cmd: &[String], trace_log: &str) -> i32 {
@@ -379,12 +406,12 @@ pub fn run(cmd: &[String], trace_log: &str) -> i32 {
     // Create maps.
     let pid_map_fd = bpf_create_map(BPF_MAP_TYPE_HASH, 4, 4, 1);
     if pid_map_fd < 0 {
-        return not_built();
+        return bpf_fail();
     }
     let ring_fd = bpf_create_map(BPF_MAP_TYPE_RINGBUF, 0, 0, RINGBUF_SZ as u32);
     if ring_fd < 0 {
         unsafe { libc::close(pid_map_fd) };
-        return not_built();
+        return bpf_fail();
     }
 
     // Build + load programs (with real map fds baked in).
@@ -396,7 +423,7 @@ pub fn run(cmd: &[String], trace_log: &str) -> i32 {
             libc::close(pid_map_fd);
             libc::close(ring_fd);
         }
-        return not_built();
+        return bpf_fail();
     }
     let exit_fd = bpf_prog_load(BPF_PROG_TYPE_TRACEPOINT, &exit_prog);
     if exit_fd < 0 {
@@ -475,6 +502,26 @@ pub fn run(cmd: &[String], trace_log: &str) -> i32 {
         unsafe {
             libc::kill(pid, libc::SIGKILL);
             libc::waitpid(pid, &mut status, 0);
+        }
+        // tracefs is mounted 700 root:root on most systems, and file
+        // capabilities do not bypass path permissions, so this is the
+        // step that still fails after setcap. Name the fix.
+        let id_denied = |p: &str| {
+            matches!(std::fs::read_to_string(p),
+                Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+        };
+        if unsafe { libc::geteuid() } != 0
+            && (id_denied("/sys/kernel/tracing/events/raw_syscalls/sys_enter/id")
+                || matches!(
+                    std::fs::metadata("/sys/kernel/tracing/events"),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::PermissionDenied
+                ))
+        {
+            eprintln!("ebpf backend: tracefs not readable (tracepoint ids live in /sys/kernel/tracing)");
+            eprintln!("  as a normal user: sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing");
+            eprintln!("  (the id files are 0440 root:root, so mode= alone is not enough —");
+            eprintln!("   gid= hands them to your group; or run vock as root)");
+            return -1;
         }
         return not_built();
     }

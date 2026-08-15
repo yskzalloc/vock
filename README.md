@@ -18,10 +18,13 @@ KCOV+vmlinux and KCOV+BTF across all three syscall backends (`ptrace`, `sud`,
 `ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 3`
 (crypto) passes; `selftest 4` reproduces a real KASAN use-after-free from the
 bundled sample. `selftest 2` (HW trace) traces with Intel PT on bare metal
-(`--on host`, root or `perf_event_paranoid ≤ 1`). The `sud` backend
-traces up to and including the target's `execve` (the LD_PRELOAD re-injection
-that keeps tracing past exec is not yet ported). HW trace (Intel PT / AMD LBR /
-CoreSight) is ported and builds; arm64 and AMD are validated in follow-up work.
+(`--on host`, root or `perf_event_paranoid ≤ 1`) and is fully validated on
+AMD: one run covers a host pass and a KVM-guest pass across all three
+backends — 26/26 checks pass as a normal user with the privileges described
+under [eBPF Syscall Backend](#ebpf-syscall-backend---syscall-ebpf). The `sud`
+backend traces up to and including the target's `execve` (the LD_PRELOAD
+re-injection that keeps tracing past exec is not yet ported). CoreSight
+(arm64) is ported and builds; it is validated in follow-up work.
 
 `vock execprog` is a **syz-execprog-style executor**: it replays a program
 with `-repeat`/`-procs` and can attribute KCOV coverage to each call. An
@@ -171,6 +174,40 @@ CONFIG_BPF_SYSCALL=y
 CONFIG_DEBUG_INFO_BTF=y
 ```
 
+Privileges: the backend calls `bpf(2)` and attaches a tracepoint program.
+Most distributions ship `kernel.unprivileged_bpf_disabled=1` or `2`, so as a
+normal user the very first `bpf()` call fails with `EPERM` and vock skips the
+backend (the message names the sysctl). To use it without root:
+
+```bash
+sudo sysctl kernel.unprivileged_bpf_disabled=0   # value 1 is locked until reboot
+```
+
+Loading the tracepoint program additionally needs `CAP_BPF` + `CAP_PERFMON`,
+so grant them as file capabilities (or simply run vock as root):
+
+```bash
+sudo setcap cap_bpf,cap_perfmon+ep ./vock.bin        # build tree
+sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/vock # installed
+```
+
+The backend also reads tracepoint ids from tracefs, which most systems mount
+`700 root:root` — and file capabilities do not bypass path permissions. Note
+that `mode=` only opens the directories; the `id` files themselves stay
+`0440 root:root`, so the group must be handed over too with `gid=`:
+
+```bash
+sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing
+```
+
+So the full normal-user recipe is: the sysctl, the setcap, and the tracefs
+remount — vock names the missing step in its skip message at each stage.
+Two caveats: `make` / `make install` rewrite the binary, which drops the
+capabilities, so re-apply setcap after every rebuild; and the kernel ignores
+`LD_PRELOAD` for a capability-bearing binary (secure execution), which does
+not matter here — vock sets `LD_PRELOAD` for its *children*, never for
+itself. Inside a vng/virtme VM you are root, so none of this applies.
+
 ### Coverage Report with Source Annotation (`--vmlinux`, `--kernel-src`)
 
 ```
@@ -190,7 +227,7 @@ CONFIG_IKCONFIG_PROC=y
 
 ```
 CONFIG_CRYPTO_XTS=y
-CONFIG_CRYPTO_USER=y
+CONFIG_CRYPTO_AES=y
 CONFIG_CRYPTO_USER_API_SKCIPHER=y
 ```
 
@@ -208,8 +245,8 @@ CONFIG_CRYPTO_USER_API_SKCIPHER=y
 | Backend | Flag | Requirement |
 |---------|------|-------------|
 | ptrace | `--syscall ptrace` (default) | Any kernel |
-| SUD | `--syscall sud` | Kernel ≥ 5.11, x86_64, `mmap_min_addr=0` |
-| eBPF | `--syscall ebpf` | `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y` |
+| SUD | `--syscall sud` | Kernel ≥ 5.11 with `SYSCALL_USER_DISPATCH`, x86_64, `mmap_min_addr=0` |
+| eBPF | `--syscall ebpf` | `CONFIG_BPF_SYSCALL=y`, `CONFIG_DEBUG_INFO_BTF=y`, root or `unprivileged_bpf_disabled=0` + `CAP_BPF`/`CAP_PERFMON` |
 
 SUD setup:
 ```bash
@@ -257,8 +294,20 @@ sudo ./vock.bin selftest 2 --on host     # HW trace, auto-selected for the host 
 
 Test 2 detects the host CPU and runs the matching engine — Intel PT or AMD LBR
 on x86_64, CoreSight on arm64. Intel PT and CoreSight need `--on host` (and
-either root or `perf_event_paranoid ≤ 1`); AMD LBR also works under `--on
-vng-kvm`.
+either root or `perf_event_paranoid ≤ 1`); on AMD LBR CPUs one `--on vng-kvm`
+run covers both a host pass and a KVM-guest pass. The host pass's ebpf
+backend needs root, or as a normal user all three of:
+
+```bash
+sudo sysctl kernel.unprivileged_bpf_disabled=0                    # allow bpf(2)
+sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/vock              # program load
+sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing   # tracepoint ids
+```
+
+Each missing step SKIPs with the exact command to run; with all three
+granted the full test passes (verified 26/26 on an AMD Ryzen, host ebpf
+included). Re-apply `setcap` after every rebuild — writing the binary drops
+file capabilities.
 
 ## Output Files
 

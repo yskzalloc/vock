@@ -11,8 +11,10 @@ kernel toolchain.
 # Test 1 — KCOV + syscall engines + reporting (VM)
 vock selftest 1 --on vng-kvm --kernel-src ~/stable
 
-# Test 2 — HW trace, auto-selected for the host CPU (bare metal, needs root)
+# Test 2 — HW trace, auto-selected for the host CPU (bare metal, needs root;
+# on AMD LBR CPUs it also runs fully inside a KVM guest — no root needed)
 sudo vock selftest 2 --on host --kernel-src ~/stable
+vock selftest 2 --on vng-kvm --kernel-src ~/stable   # AMD LBR
 
 # Test 3 — --filter + xts(aes) crypto coverage (VM)
 vock selftest 3 --on vng-kvm --kernel-src ~/stable
@@ -31,6 +33,12 @@ vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH]
               [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-4]
 ```
 
+`vock selftest --help` also prints, for every test, the equivalent raw
+command (the exact `vng --rw -- vock ...` invocation and any setup it needs),
+so each test can be replayed by hand. The target programs and their setup
+live in [`vock/src/selftest/target.rs`](vock/src/selftest/target.rs),
+separate from the harness.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--on` | `vng-kvm` | Execution target (`host`, `vng-kvm`, `vng-tcg`) |
@@ -46,7 +54,7 @@ vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH]
 | # | Name | Runs on | What |
 |---|------|---------|------|
 | 1 | Coverage + Syscall + Syzlang | vng | Every KCOV collection & reporting feature: KCOV+vmlinux, KCOV+BTF × each `--syscall` + `--syzlang`, plus `--ordered` and `--filter` |
-| 2 | Intel PT / AMD LBR / Arm64 CoreSight | **host** | Detects the host CPU and runs the matching HW engine: HW + vmlinux × each `--syscall` + `--syzlang` |
+| 2 | Intel PT / AMD LBR / Arm64 CoreSight | **host** (AMD LBR: vng too) | Detects the host CPU and runs the matching HW engine: HW + vmlinux × each `--syscall` + `--syzlang` |
 | 3 | Filter + xts Crypto | vng | `--filter` narrowed xts(aes) decrypt coverage + plaintext verification |
 | 4 | KASAN bug hunt | vng | build a KASAN+KCOV kernel; loop a sample reproducer (MIDI UAF) for ≤30 min, watching for a KASAN report |
 
@@ -81,12 +89,37 @@ features across three groups.
 Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0, HTML
 report, per-TID ordered report, and keyword filtering. `sud` traces up to the
 target's `execve`, so its `trace.log` is short by design; KCOV coverage is
-collected regardless of syscall backend.
+collected regardless of syscall backend. On kernels without
+`SYSCALL_USER_DISPATCH` (arm64 without `GENERIC_ENTRY`) the `sud` runs SKIP
+rather than fail.
 
 ## Test 2: Intel PT / AMD LBR / CoreSight (host)
 
 Detects the host CPU and builds a kernel **without KCOV**, then runs the engine
-that matches the hardware:
+that matches the hardware. On an AMD LBR CPU with `--on vng-kvm` (the
+default), one invocation runs **both** passes:
+
+* **2.1 host** — traces the running host kernel directly (skips cleanly
+  when perf privileges are missing, i.e. `perf_event_paranoid >= 2`
+  without root)
+* **2.2 guest** — boots the freshly built kernel in the KVM guest and
+  traces there
+
+For the host pass to run the **ebpf** backend as a normal user, `bpf(2)`
+and the tracepoint program load must both be permitted:
+
+```bash
+sudo sysctl kernel.unprivileged_bpf_disabled=0         # 1 is locked until reboot
+sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/vock   # or ./vock.bin
+sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing  # tracepoint ids (gid=: the id files are 0440)
+```
+
+Each missing step SKIPs naming the exact command; with all three granted
+the host pass runs every backend and the whole test passes — verified
+26 passed / 0 failed / 0 skipped on an AMD Ryzen 7 250 as a normal user.
+Re-apply `setcap` after every `make` / `make install` (they rewrite the
+binary and Linux drops file capabilities on write). Root needs none of
+this. The guest passes are unaffected (you are root inside the VM).
 
 | Host | Engine | Extra config |
 |------|--------|--------------|
@@ -99,7 +132,9 @@ that matches the hardware:
 sudo vock selftest 2 --on host --kernel-src ~/stable
 echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid    # alternative to root
 
-# AMD LBR also works inside a KVM guest
+# AMD LBR virtualizes on Zen, so a KVM guest works too (no root needed;
+# this is what CI runs on AMD runners). Intel PT and CoreSight stay
+# host-only — KVM does not expose them to guests.
 vock selftest 2 --on vng-kvm --kernel-src ~/stable
 ```
 
@@ -118,17 +153,22 @@ Skips automatically when:
 
 ## Test 3: Filter + xts(aes) Crypto (vng)
 
-Builds a KCOV kernel with the crypto subsystem enabled, encrypts a block with
-`kcapi-enc`, then traces the **decrypt** with a keyword-filtered report:
+Builds a KCOV kernel with the crypto subsystem enabled, stages an xts(aes)
+workload **in Rust over AF_ALG** (no kcapi-tools, no shell): the harness
+encrypts a random block on the host (`vock selftest target crypto-setup`),
+then traces the in-VM **decrypt** with a keyword-filtered report:
 
 ```
---mode kcov --filter crypto --vmlinux  /bin/sh /tmp/dec.sh
+--mode kcov --filter crypto --vmlinux  vock selftest target crypto-decrypt
     → kerncov.log + coverage.html (narrowed to crypto/ paths)
 ```
 
-Verifies: coverage PCs > 0, `coverage.html` generated, the filtered report
-contains `aes`/`xts`/`crypto`/`skcipher` paths, and the decrypted plaintext
-matches the original (`cmp /tmp/block.img /tmp/block.dec`).
+The staged files (`vock-block.img/.enc/.dec`, `vock-key.bin`) live in the
+kernel tree, which vng shares with the host, so every check runs host-side on
+the files themselves — no stdout markers. Verifies: coverage PCs > 0,
+`coverage.html` generated, the filtered report contains
+`aes`/`xts`/`crypto`/`skcipher` paths, and the decrypted plaintext matches
+the original.
 
 > Note: `xts(aes)` via AF_ALG completes asynchronously (cryptd / io-wq worker),
 > off the traced task's syscall path, so per-task KCOV may not capture the
@@ -164,7 +204,7 @@ silently — those return `ENOSYS` and are named on startup. See
 | Test | Target | Kernel subsystem |
 |------|--------|-----------------|
 | 1 | `/bin/ls /tmp` | vfs / general syscall paths |
-| 3 | `kcapi-enc -d xts(aes)` decrypt | crypto (skcipher, aes, xts) |
+| 3 | `vock selftest target crypto-decrypt` (AF_ALG xts(aes)) | crypto (skcipher, aes, xts) |
 
 ## Kernel Configuration
 
@@ -174,7 +214,7 @@ silently — those return `ENOSYS` and are named on startup. See
 CONFIG_DEBUG_KERNEL, CONFIG_KCOV, CONFIG_KCOV_INSTRUMENT_ALL, CONFIG_DEBUG_FS,
 CONFIG_DEBUG_INFO, CONFIG_DEBUG_INFO_DWARF5, CONFIG_DEBUG_INFO_BTF,
 CONFIG_PERF_EVENTS, CONFIG_BPF_SYSCALL, CONFIG_IKCONFIG, CONFIG_IKCONFIG_PROC,
-CONFIG_CRYPTO_XTS, CONFIG_CRYPTO_USER, CONFIG_CRYPTO_USER_API_SKCIPHER
+CONFIG_CRYPTO_XTS, CONFIG_CRYPTO_AES, CONFIG_CRYPTO_USER_API_SKCIPHER
 ```
 
 ### Test 2 (HW trace, no KCOV)
@@ -192,9 +232,9 @@ CONFIG_KCOV=n, CONFIG_PERF_EVENTS=y, CONFIG_DEBUG_INFO=y, CONFIG_DEBUG_INFO_BTF=
 | `--mode kcov` | `KCOV`, `KCOV_INSTRUMENT_ALL`, `DEBUG_INFO` |
 | `--btf` | `DEBUG_INFO_BTF` |
 | `--syscall ptrace` | (none) |
-| `--syscall sud` | (none, kernel ≥ 5.11) |
+| `--syscall sud` | kernel ≥ 5.11 with `SYSCALL_USER_DISPATCH` (x86_64; arm64 kernels without `GENERIC_ENTRY` SKIP) |
 | `--syscall ebpf` | `BPF_SYSCALL`, `DEBUG_INFO_BTF` |
-| crypto target | `CRYPTO_XTS`, `CRYPTO_USER`, `CRYPTO_USER_API_SKCIPHER` |
+| crypto target | `CRYPTO_XTS`, `CRYPTO_AES`, `CRYPTO_USER_API_SKCIPHER` (AF_ALG) |
 
 ## LLVM Toolchain
 
@@ -214,8 +254,17 @@ itself is built with `cargo` (any `CC=` passed to `make` is ignored).
 ## GitHub CI
 
 The workflow lives in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-and runs tests 1, 2 and 3 on x86_64 and arm64 runners. Two things it has to
-work around, worth knowing if you script selftest yourself:
+and runs tests 1, 2 and 3 on x86_64 and arm64 runners. Each job writes a
+**summary table** (test, verdict, pass/fail/skip counts) to the Actions
+run's Summary tab, uploads every test's full log as its **own artifact**
+linked from that table, and appends the reproducible raw command for each
+test — the same text `vock selftest --help` prints, via
+`vock selftest raw <n>`, so the two cannot drift. The summary layout is a
+static template, [`template/ACTION.md`](template/ACTION.md): the last CI
+step substitutes `{{ARCH}}` and replaces the `{{RESULT_ROWS}}` /
+`{{RAW_COMMANDS}}` placeholder lines, so the page can be restyled without
+touching the workflow. Two things the workflow
+has to work around, worth knowing if you script selftest yourself:
 
 * **`sudo` breaks the rebuild.** selftest re-runs `make` on startup, `make`
   needs `cargo`, and sudoers' `secure_path` drops `~/.cargo/bin`. Either pass

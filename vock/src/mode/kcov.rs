@@ -130,6 +130,21 @@ pub fn run(
         }
     };
 
+    // Drop per-TID logs from any previous run: both the ordered report and
+    // the post-exit merge below scan the directory by name pattern, so stale
+    // files would be silently folded into this run's coverage.
+    if let Ok(rd) = std::fs::read_dir(".") {
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let name = name.to_string_lossy().into_owned();
+            if (name.starts_with("local-") || name.starts_with("remote-"))
+                && name.contains(".log")
+            {
+                let _ = std::fs::remove_file(ent.path());
+            }
+        }
+    }
+
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         // Child: preload the shim and exec the target.
@@ -188,6 +203,12 @@ pub fn run(
             }
         }
     } else {
+        // The shim's initial process merges the per-TID logs from its exit
+        // destructor, but a shell target may _exit() without running
+        // fini_arrays (dash does), leaving kerncov.log empty or stale. The
+        // parent is the one process that reliably outlives every task, so
+        // merge here regardless.
+        merge_tid_logs();
         eprintln!("[vock] generating report");
         let opts = report::Options {
             kernel_src: kernel_src.map(String::from),
@@ -209,6 +230,30 @@ pub fn run(
     } else {
         1
     }
+}
+
+/// Concatenate every per-TID `local-*.log` / `remote-*.log` in the working
+/// directory into `kerncov.log` (same merge the shim performs on teardown).
+fn merge_tid_logs() {
+    let Ok(merged) = std::fs::File::create("kerncov.log") else {
+        return;
+    };
+    let mut w = std::io::BufWriter::new(merged);
+    if let Ok(rd) = std::fs::read_dir(".") {
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let name = name.to_string_lossy();
+            let is_log = (name.starts_with("local-") || name.starts_with("remote-"))
+                && name.contains(".log");
+            if !is_log {
+                continue;
+            }
+            if let Ok(data) = std::fs::read(ent.path()) {
+                let _ = w.write_all(&data);
+            }
+        }
+    }
+    let _ = w.flush();
 }
 
 fn perror(msg: &str) {

@@ -34,10 +34,11 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
+        # The crypto coverage test (selftest 3) drives AF_ALG from vock itself,
+        # so no kcapi-tools needed.
         sudo apt-get install -y clang flex bison bc dwarves pahole libelf-dev \
                              libssl-dev kmod libncurses-dev git \
-                             python3-pip python3-venv qemu-system curl \
-                             kcapi-tools # For kernel crypto subsystem coverage test
+                             python3-pip python3-venv qemu-system curl
 
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
@@ -74,21 +75,33 @@ jobs:
     - name: vock selftest
       run: |
         source venv-virtme/bin/activate
+        mkdir -p selftest-logs
 
         # Collect results instead of aborting on the first failure: a SKIP or a
         # single failing engine should still let the rest report. The job fails
         # at the end if anything failed -- previously the whole block ran under
         # `set +e` with no exit-code check, so CI could never go red.
+        # Each test's full output goes to selftest-logs/<slug>.log (uploaded as
+        # a per-test artifact) and its verdict to summary.tsv (rendered into
+        # the job summary together with the reproducible raw command).
         rc=0
         run_test() {
-            echo "::group::$1"
-            shift
-            "$@"
-            local status=$?
+            local slug="$1" raw="$2" title="$3"
+            shift 3
+            echo "::group::$title"
+            "$@" 2>&1 | tee "selftest-logs/$slug.log"
+            local status=${PIPESTATUS[0]}
+            local verdict=PASS
             if [ $status -ne 0 ]; then
-                echo "FAILED (exit $status): $*"
+                echo "FAILED (exit $status): $title"
+                verdict=FAIL
                 rc=1
             fi
+            local line
+            line=$(grep -oE 'Results: [^=]*' "selftest-logs/$slug.log" | tail -1)
+            printf '%s\t%s\t%s\t%s\t%s\n' \
+                "$slug" "$raw" "$verdict" "$title" "${line:-no results line}" \
+                >> selftest-logs/summary.tsv
             echo "::endgroup::"
         }
 
@@ -107,7 +120,7 @@ jobs:
 
         KSRC="--kernel-src staging --vmlinux staging/vmlinux"
 
-        run_test "Test 1: KCOV + syscall/syzlang engines ($ON)" \
+        run_test test1 1 "Test 1: KCOV + syscall/syzlang engines ($ON)" \
             ./vock.bin selftest 1 -v --on $ON $KSRC
 
         # HW trace on the host. What CI hardware can actually exercise:
@@ -117,18 +130,101 @@ jobs:
         #   * AMD LBR is the only HW trace engine reachable on GitHub runners
         #   * arm64 runners expose no CoreSight
         # So on Intel runners this is expected to SKIP rather than trace.
-        run_test "Test 2.1: HW trace (host)" \
+        run_test test2-host 2 "Test 2.1: HW trace (host)" \
             as_root ./vock.bin selftest 2 -v --on host --no-build $KSRC
 
-        run_test "Test 2.2: HW trace ($ON guest)" \
+        run_test test2-guest 2 "Test 2.2: HW trace ($ON guest)" \
             ./vock.bin selftest 2 -v --on $ON $KSRC
 
-        run_test "Test 3: --filter + xts(aes) crypto ($ON)" \
+        run_test test3 3 "Test 3: --filter + xts(aes) crypto ($ON)" \
             ./vock.bin selftest 3 -v --on $ON $KSRC
 
         exit $rc
 
+    # One artifact per test so each result is downloadable through its own
+    # link from the job summary below.
+    - name: Upload test 1 log
+      if: always()
+      id: up-test1
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-1-${{ matrix.arch }}
+        path: selftest-logs/test1.log
+        if-no-files-found: ignore
+
+    - name: Upload test 2.1 log
+      if: always()
+      id: up-test2-host
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-2-host-${{ matrix.arch }}
+        path: selftest-logs/test2-host.log
+        if-no-files-found: ignore
+
+    - name: Upload test 2.2 log
+      if: always()
+      id: up-test2-guest
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-2-guest-${{ matrix.arch }}
+        path: selftest-logs/test2-guest.log
+        if-no-files-found: ignore
+
+    - name: Upload test 3 log
+      if: always()
+      id: up-test3
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-3-${{ matrix.arch }}
+        path: selftest-logs/test3.log
+        if-no-files-found: ignore
+
+    - name: Job summary
+      # Renders template/ACTION.md: {{ARCH}} is substituted inline, and the
+      # {{RESULT_ROWS}} / {{RAW_COMMANDS}} placeholder lines are replaced by
+      # the generated table rows and the per-test raw commands. Edit the
+      # template to change the summary layout; this step only fills it in.
+      if: always()
+      env:
+        URL_TEST1: ${{ steps.up-test1.outputs.artifact-url }}
+        URL_TEST2_HOST: ${{ steps.up-test2-host.outputs.artifact-url }}
+        URL_TEST2_GUEST: ${{ steps.up-test2-guest.outputs.artifact-url }}
+        URL_TEST3: ${{ steps.up-test3.outputs.artifact-url }}
+        ARCH: ${{ matrix.arch }}
+      run: |
+        while IFS=$'\t' read -r slug raw verdict title line; do
+            case "$slug" in
+                test1)       url="$URL_TEST1" ;;
+                test2-host)  url="$URL_TEST2_HOST" ;;
+                test2-guest) url="$URL_TEST2_GUEST" ;;
+                test3)       url="$URL_TEST3" ;;
+                *)           url="" ;;
+            esac
+            icon=$([ "$verdict" = PASS ] && echo ':white_check_mark:' || echo ':x:')
+            echo "| $title | $icon $verdict | $line | [download]($url) |"
+        done < selftest-logs/summary.tsv > selftest-logs/rows.md
+
+        for n in $(cut -f2 selftest-logs/summary.tsv | sort -u); do
+            echo "<details><summary>selftest $n</summary>"
+            echo ""
+            echo '```'
+            ./vock.bin selftest raw "$n"
+            echo '```'
+            echo "</details>"
+            echo ""
+        done > selftest-logs/raw.md
+
+        while IFS= read -r tline; do
+            case "$tline" in
+                *'{{RESULT_ROWS}}'*)  cat selftest-logs/rows.md ;;
+                *'{{RAW_COMMANDS}}'*) cat selftest-logs/raw.md ;;
+                *) echo "${tline//'{{ARCH}}'/$ARCH}" ;;
+            esac
+        done < template/ACTION.md >> "$GITHUB_STEP_SUMMARY"
+
     - name: "Report"
+      # The failing runs are exactly the ones whose dmesg we need.
+      if: always()
       run: |
         sudo dmesg
 
