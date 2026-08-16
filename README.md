@@ -21,9 +21,10 @@ in both v0-mangled and demangled form. `selftest 1` (KCOV) covers
 KCOV+vmlinux and KCOV+BTF across all three syscall backends (`ptrace`, `sud`,
 `ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 3`
 (crypto) passes; `selftest 4` reproduces a real KASAN use-after-free from the
-bundled sample. `selftest 2` (HW trace) traces with Intel PT on bare metal
-(`--on host`, root or `perf_event_paranoid ≤ 1`) and is fully validated on
-AMD: one run covers a host pass and a KVM-guest pass across all three
+bundled sample. `selftest 2` (HW trace) is validated on Intel bare metal
+(Core Ultra 7 268V: Intel PT, 18/18 with zero skips as a normal user
+holding the documented privileges, ebpf backend and ordered sequence
+checks included) and on AMD: one run covers a host pass and a KVM-guest pass across all three
 backends — 26/26 checks pass as a normal user with the privileges described
 under [eBPF Syscall Backend](#ebpf-syscall-backend---syscall-ebpf). The `sud`
 backend traces up to and including the target's `execve` (the LD_PRELOAD

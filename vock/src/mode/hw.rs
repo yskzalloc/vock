@@ -14,10 +14,6 @@ mod engine;
 use crate::report;
 
 /// Whether any supported hardware-trace PMU is present.
-pub fn available() -> bool {
-    engine::available()
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     cmd: &[String],
@@ -98,8 +94,8 @@ pub fn run(
     };
     report::run(&opts);
 
-    if unsafe { libc::WIFEXITED(status) } {
-        unsafe { libc::WEXITSTATUS(status) }
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
     } else {
         1
     }

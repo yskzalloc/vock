@@ -172,9 +172,6 @@ fn real_main() -> i32 {
     let mut syscall_on = false;
     let mut syzlang_on = false;
     let mut fuzz_on = false;
-    let mut fuzz_repeat = 1; // execprog default: run once (0 = until Ctrl+C)
-    let mut fuzz_procs = 1;
-    let mut fuzz_kcov = false;
     let mut syscall_backend = "ptrace".to_string();
     let mut ctx_after: i32 = -1;
     let mut ctx_before: i32 = -1;
@@ -244,15 +241,13 @@ fn real_main() -> i32 {
             i += 1;
             while i < args.len() {
                 let f = args[i].as_str();
-                if let Some(v) = f.strip_prefix("-repeat=") {
-                    fuzz_repeat = v.parse().unwrap_or(0);
-                } else if let Some(v) = f.strip_prefix("-procs=") {
-                    fuzz_procs = v.parse().unwrap_or(1);
+                // -repeat/-procs/--mode are consumed for CLI compatibility;
+                // their values are unused while `vock fuzz` is unimplemented
+                // (it prints FUZZ_NOTICE and exits).
+                if f.strip_prefix("-repeat=").is_some() || f.strip_prefix("-procs=").is_some() {
+                    // consumed
                 } else if f == "--mode" && i + 1 < args.len() {
                     i += 1;
-                    if args[i] == "kcov" {
-                        fuzz_kcov = true;
-                    }
                 } else if f == "--help" || f == "-h" {
                     eprint!("{FUZZ_NOTICE}");
                     return 0;

@@ -28,7 +28,6 @@ const PERF_EVENT_IOC_DISABLE: libc::c_ulong = 0x2401;
 
 const PERF_TYPE_HARDWARE: u32 = 0;
 const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
-const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
 
 const PERF_SAMPLE_IP: u64 = 1 << 0;
 const PERF_SAMPLE_TIME: u64 = 1 << 2;
@@ -114,11 +113,6 @@ fn amd_lbr_available() -> bool {
 }
 
 /// Whether any supported HW-trace PMU is present (port of
-/// vock_hw_trace_available: Intel PT first, else AMD LBR).
-pub fn available() -> bool {
-    intel_pt_available() || amd_lbr_available()
-}
-
 // ─── perf_event_open helper ──────────────────────────────────────────────────
 
 unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t) -> i32 {

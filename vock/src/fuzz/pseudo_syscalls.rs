@@ -695,7 +695,7 @@ extern "C" fn on_alarm(_sig: libc::c_int) {}
 fn install_alarm_handler() {
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_sigaction = on_alarm as usize;
+        sa.sa_sigaction = on_alarm as *const () as usize;
         sa.sa_flags = 0; // no SA_RESTART
         libc::sigemptyset(&mut sa.sa_mask);
         libc::sigaction(libc::SIGALRM, &sa, std::ptr::null_mut());
