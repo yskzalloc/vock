@@ -520,7 +520,9 @@ fn real_main() -> i32 {
         if !sud::available() {
             // The live prctl probe failed: the kernel lacks
             // SYSCALL_USER_DISPATCH (needs >= 5.11 and, per arch, generic
-            // entry - arm64 kernels without CONFIG_GENERIC_ENTRY have none).
+            // syscall entry: SUD is built by CONFIG_GENERIC_SYSCALL, which
+            // only CONFIG_GENERIC_ENTRY selects, and arm64 selects just
+            // GENERIC_IRQ_ENTRY, so its set_syscall_user_dispatch() is a stub).
             eprintln!("error: SUD (SYSCALL_USER_DISPATCH) not supported by this kernel/arch");
             return 1;
         }

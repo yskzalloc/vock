@@ -15,14 +15,38 @@
 
 use std::path::Path;
 
-/// Test 1 workload: create a unique file. `touch` drives the vfs write path
-/// end to end (openat with O_CREAT, inode allocation, utimensat), so the
-/// harness can assert that inode/write related functions really appear in
-/// the resolved coverage.
-pub const KCOV_TARGET: &str = "/bin/touch \"/tmp/$(date +%s).txt\"";
+/// Test 1 workload: `vock selftest target vfs-write`, an explicit write-path
+/// exercise (see [`vfs_write`]).
+///
+/// This used to be `/bin/touch "/tmp/$(date +%s).txt"`. Borrowing a coreutils
+/// program makes the kernel side unpredictable: which syscalls touch issues
+/// depends on the build (utimensat vs utimes, statx vs fstat), the shell has
+/// to expand a command substitution to make the name unique, and busybox
+/// touch takes different paths again. The traced program is the experiment
+/// here, so it is spelled out in vock itself: one process, a fixed syscall
+/// sequence, every call chosen for the kernel path it must reach.
+pub const KCOV_TARGET_ARGS: &[&str] = &["selftest", "target", "vfs-write"];
 
-/// Test 2 workload: plain syscall traffic through vfs paths.
-pub const COVERAGE_TARGET: &str = "/bin/ls /tmp";
+/// Test 2 workload: `vock selftest target vfs-read`, an explicit read and
+/// directory-iteration exercise (see [`vfs_read`]), replacing `/bin/ls /tmp`
+/// for the same reason.
+pub const COVERAGE_TARGET_ARGS: &[&str] = &["selftest", "target", "vfs-read"];
+
+/// Sequence-mode workload: `vock selftest target vfs-fork`, which forks a
+/// fixed number of children (see [`vfs_fork`]), replacing `/bin/sh -c 'ls;
+/// ls'`. The shell forked whatever it felt like; this forks exactly twice,
+/// so "at least two per-TID reports" is a property of the target rather
+/// than of the shell that happens to be installed.
+pub const FORK_TARGET_ARGS: &[&str] = &["selftest", "target", "vfs-fork"];
+
+/// How many children [`vfs_fork`] spawns, and therefore the minimum number
+/// of per-task coverage logs the ordered tests must see.
+pub const FORK_CHILDREN: usize = 2;
+
+/// Render a target as a shell word list: `<vock binary> selftest target X`.
+pub fn target_cmd(vock: &str, args: &[&str]) -> String {
+    format!("{vock} {}", args.join(" "))
+}
 
 /// Test 3 traced target: this same vock binary running the AF_ALG decrypt.
 pub const CRYPTO_TARGET_ARGS: &[&str] = &["selftest", "target", "crypto-decrypt"];
@@ -99,6 +123,191 @@ pub fn rust_touch() -> Result<(), String> {
     }
 }
 
+// ─── vfs workloads (tests 1 and 2) ──────────────────────────────────────────
+
+/// Path this process writes, unique per pid so concurrent runs never collide.
+fn vfs_path(tag: &str) -> std::ffi::CString {
+    std::ffi::CString::new(format!("/tmp/vock-{tag}-{}.txt", unsafe { libc::getpid() }))
+        .unwrap()
+}
+
+/// The write path, spelled out: create, write, flush, change metadata,
+/// truncate, stat, re-open, read back, unlink. Each call is here for the
+/// kernel code it must run, so the harness can assert that inode and write
+/// functions appear in the coverage and mean it:
+///
+/// * `openat(O_CREAT|O_WRONLY|O_TRUNC)`, path walk, `vfs_create`, inode
+///   allocation
+/// * `write`, `vfs_write` and the filesystem write path
+/// * `fsync`, writeback
+/// * `futimens`, inode timestamps, the aspect `touch` used to provide
+/// * `fchmod` and `ftruncate`, `notify_change` / `do_truncate` on the inode
+/// * `fstat`, `vfs_getattr`
+/// * `unlink`, `vfs_unlink` and the inode teardown
+pub fn vfs_write() -> Result<(), String> {
+    let path = vfs_path("vfs");
+    unsafe {
+        let fd = libc::open(
+            path.as_ptr(),
+            libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+            0o644,
+        );
+        if fd < 0 {
+            return Err(format!(
+                "open {}: {}",
+                path.to_string_lossy(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let buf = [b'v'; 4096];
+        let mut written = 0isize;
+        for _ in 0..4 {
+            let w = libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
+            if w < 0 {
+                libc::close(fd);
+                return Err(format!("write: {}", std::io::Error::last_os_error()));
+            }
+            written += w;
+        }
+        libc::fsync(fd);
+        // UTIME_NOW on both stamps: the inode timestamp update `touch` did.
+        let times = [
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+            libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+        ];
+        libc::futimens(fd, times.as_ptr());
+        libc::fchmod(fd, 0o600);
+        libc::ftruncate(fd, 2048);
+        let mut st: libc::stat = std::mem::zeroed();
+        libc::fstat(fd, &mut st);
+        libc::close(fd);
+
+        // Re-open and read back: a second path walk over a cached dentry.
+        let mut back = [0u8; 512];
+        let rfd = libc::open(path.as_ptr(), libc::O_RDONLY);
+        let read = if rfd >= 0 {
+            let r = libc::read(rfd, back.as_mut_ptr() as *mut libc::c_void, back.len());
+            libc::close(rfd);
+            r
+        } else {
+            -1
+        };
+        libc::unlink(path.as_ptr());
+        println!(
+            "vfs-write: wrote={written} truncated_to={} read_back={read} path={}",
+            st.st_size,
+            path.to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+/// The read side, spelled out: iterate a directory with `getdents64` and
+/// read a file start to finish. Same rationale as [`vfs_write`], this is
+/// what `/bin/ls /tmp` was standing in for.
+pub fn vfs_read() -> Result<(), String> {
+    // Give the directory iteration something of ours to find, and the read
+    // a file whose size we know.
+    let path = vfs_path("read");
+    let mut entries = 0usize;
+    let mut bytes = 0isize;
+    unsafe {
+        let fd = libc::open(
+            path.as_ptr(),
+            libc::O_CREAT | libc::O_WRONLY | libc::O_TRUNC,
+            0o644,
+        );
+        if fd >= 0 {
+            let buf = [b'r'; 1024];
+            let _ = libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len());
+            libc::close(fd);
+        }
+
+        // getdents64 over /tmp: iterate_dir and the filldir path.
+        let dir = std::ffi::CString::new("/tmp").unwrap();
+        let dfd = libc::open(dir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY);
+        if dfd < 0 {
+            return Err(format!("open /tmp: {}", std::io::Error::last_os_error()));
+        }
+        let mut dbuf = [0u8; 32 * 1024];
+        loop {
+            let n = libc::syscall(
+                libc::SYS_getdents64,
+                dfd,
+                dbuf.as_mut_ptr() as *mut libc::c_void,
+                dbuf.len(),
+            );
+            if n <= 0 {
+                break;
+            }
+            // Walk the records to count them; d_reclen is at offset 16.
+            let mut off = 0usize;
+            while off < n as usize {
+                let reclen = u16::from_ne_bytes([dbuf[off + 16], dbuf[off + 17]]) as usize;
+                if reclen == 0 {
+                    break;
+                }
+                entries += 1;
+                off += reclen;
+            }
+        }
+        libc::close(dfd);
+
+        // Read our file back through a fresh descriptor.
+        let rfd = libc::open(path.as_ptr(), libc::O_RDONLY);
+        if rfd >= 0 {
+            let mut rbuf = [0u8; 4096];
+            loop {
+                let r = libc::read(rfd, rbuf.as_mut_ptr() as *mut libc::c_void, rbuf.len());
+                if r <= 0 {
+                    break;
+                }
+                bytes += r;
+            }
+            libc::close(rfd);
+        }
+        libc::unlink(path.as_ptr());
+    }
+    println!("vfs-read: dirents={entries} bytes={bytes}");
+    Ok(())
+}
+
+/// Sequence-mode workload: fork [`FORK_CHILDREN`] children, each running the
+/// [`vfs_write`] sequence, and wait for them. Every task is a real fork of a
+/// process the KCOV shim instruments, so the ordered tests see a known
+/// number of per-task logs instead of however many a shell decided to make.
+pub fn vfs_fork() -> Result<(), String> {
+    let mut kids = Vec::new();
+    for _ in 0..FORK_CHILDREN {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            let code = i32::from(vfs_write().is_err());
+            unsafe { libc::_exit(code) };
+        }
+        if pid < 0 {
+            return Err(format!("fork: {}", std::io::Error::last_os_error()));
+        }
+        kids.push(pid);
+    }
+    // The parent contributes its own coverage too, so the merged log always
+    // holds more tasks than children.
+    vfs_write()?;
+    let mut failed = 0;
+    for pid in kids {
+        let mut status = 0;
+        unsafe { libc::waitpid(pid, &mut status, 0) };
+        if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+            failed += 1;
+        }
+    }
+    println!("vfs-fork: children={FORK_CHILDREN} failed={failed}");
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} child(ren) failed"))
+    }
+}
+
 /// Dispatcher for `vock selftest target <name>`, the in-VM halves of the
 /// selftest workloads.
 pub fn run_target(args: &[String]) -> i32 {
@@ -120,6 +329,27 @@ pub fn run_target(args: &[String]) -> i32 {
                 1
             }
         },
+        Some("vfs-write") => match vfs_write() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vfs-write: {e}");
+                1
+            }
+        },
+        Some("vfs-read") => match vfs_read() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vfs-read: {e}");
+                1
+            }
+        },
+        Some("vfs-fork") => match vfs_fork() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("vfs-fork: {e}");
+                1
+            }
+        },
         Some("crypto-decrypt") => match crypto_decrypt(Path::new(".")) {
             Ok(()) => 0,
             Err(e) => {
@@ -128,7 +358,10 @@ pub fn run_target(args: &[String]) -> i32 {
             }
         },
         _ => {
-            eprintln!("vock selftest target: expected crypto-setup | crypto-decrypt | rust-touch");
+            eprintln!(
+                "vock selftest target: expected crypto-setup | crypto-decrypt | \
+                 rust-touch | vfs-write | vfs-read | vfs-fork"
+            );
             2
         }
     }
@@ -306,13 +539,16 @@ pub fn raw_command(test: &str) -> Option<String> {
     match test {
         "1" => Some(format!(
             "vng --rw -- vock --mode kcov --syzlang --syscall ptrace \\\n\
-    --vmlinux ./vmlinux --kernel-src . {KCOV_TARGET}\n\
+    --vmlinux ./vmlinux --kernel-src . vock selftest target vfs-write\n\
 ... repeated for --syscall sud/ebpf, with --btf instead of --vmlinux,\n\
-and with --ordered / --filter fs   (sud runs need: {SUD_SETUP})"
+and with --ordered (target: vock selftest target vfs-fork) / --filter fs\n\
+# vfs-write/-read/-fork are explicit syscall sequences in vock itself, not\n\
+# coreutils, so the kernel paths under test never depend on which /bin/touch\n\
+# or /bin/ls the guest happens to ship   (sud runs need: {SUD_SETUP})"
         )),
         "2" => Some(format!(
             "vock --mode hw --syzlang --syscall ptrace \\\n\
-    --vmlinux ./vmlinux --kernel-src . {COVERAGE_TARGET}\n\
+    --vmlinux ./vmlinux --kernel-src . vock selftest target vfs-read\n\
 ... repeated for --syscall sud/ebpf; bare metal for Intel PT/CoreSight,\n\
 AMD LBR also works via vng --rw --. The host ebpf run needs root, or\n\
 as a normal user: sudo sysctl kernel.unprivileged_bpf_disabled=0,\n\

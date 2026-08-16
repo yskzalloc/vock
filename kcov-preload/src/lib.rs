@@ -259,6 +259,33 @@ pub unsafe extern "C" fn vfork() -> libc::pid_t {
     fork()
 }
 
+// ─── _exit interception ─────────────────────────────────────────────────────
+//
+// Per-task logs are written by the ELF destructor, which only runs for a
+// task that leaves through exit(). A task that calls _exit() skips every
+// fini_array entry and its coverage would be lost outright: that is the
+// normal way a forked child ends (calling exit() there would run the
+// parent's atexit handlers), and dash ends that way too. Interpose both
+// spellings and flush this task's buffers first.
+
+/// # Safety
+/// Interposes libc `_exit`.
+#[no_mangle]
+pub unsafe extern "C" fn _exit(status: libc::c_int) -> ! {
+    kcov_disable();
+    let real: extern "C" fn(libc::c_int) -> ! = std::mem::transmute(real_sym(b"_exit\0"));
+    real(status)
+}
+
+/// # Safety
+/// Interposes libc `_Exit`, the C99 spelling of the same call.
+#[no_mangle]
+pub unsafe extern "C" fn _Exit(status: libc::c_int) -> ! {
+    kcov_disable();
+    let real: extern "C" fn(libc::c_int) -> ! = std::mem::transmute(real_sym(b"_Exit\0"));
+    real(status)
+}
+
 // ─── exec interception ───────────────────────────────────────────────────────
 //
 // The kernel keeps a task's KCOV attachment across execve (kcov_close only

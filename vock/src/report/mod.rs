@@ -193,6 +193,21 @@ pub fn run(opts: &Options) -> i32 {
     if opts.btf {
         let resolved = btf::resolve_pcs(&addrs, "/proc/kallsyms");
         let ranked = btf::rank(&resolved);
+        // kallsyms can be unusable for reasons that have nothing to do with
+        // the coverage: no CONFIG_KALLSYMS, kptr_restrict hiding every
+        // address, an architecture whose symbols do not cover the traced
+        // range. Rather than emit an empty report (which reads as "nothing
+        // ran"), fall back to the vmlinux pipeline when one is at hand,
+        // which is the case whenever --kernel-src points at a built tree.
+        // The fallback is strictly better output, file:line instead of bare
+        // function names, so it also keeps the artifacts consistent.
+        if ranked.is_empty() && Path::new(&vmlinux).is_file() {
+            eprintln!(
+                "btf: kallsyms resolved 0 of {} PCs; falling back to \
+                 symbolization against {vmlinux}",
+                addrs.len()
+            );
+        } else {
         // Transform-layer twin, same as vmlinux mode: srccov.log carries the
         // best symbolization available. kallsyms gives function granularity
         // only, no file:line without a vmlinux.
@@ -249,6 +264,7 @@ pub fn run(opts: &Options) -> i32 {
             println!("\x1b[92m✓ Written: {txt}\x1b[0m");
         }
         return 0;
+        } // end of the kallsyms-resolved branch; otherwise fall through
     }
 
     // ── vmlinux / addr2line mode ────────────────────────────────────────────

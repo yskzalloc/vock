@@ -110,7 +110,11 @@ features across three groups.
 BTF mode resolves PCs against the running kernel's `/proc/kallsyms` (no
 vmlinux, no addr2line) and also writes `srccov.log` at kallsyms
 granularity, `0x<pc> <function>` per unique PC, so the inode/write-path
-assertion works in this group too. Resolution applies no KASLR offset
+assertion works in this group too. When kallsyms cannot resolve anything
+(no `CONFIG_KALLSYMS`, `kptr_restrict` hiding every address, or symbols
+that do not cover the traced range) vock says which of those it is and
+falls back to symbolizing against the vmlinux implied by `--kernel-src`,
+so the group reports real code instead of an empty table. Resolution applies no KASLR offset
 when the PCs already fall inside the kallsyms range, which is always the
 case for a same-kernel log on any architecture; the x86 text-base
 heuristic is reserved for foreign x86 logs.
@@ -118,13 +122,15 @@ heuristic is reserved for foreign x86 logs.
 ### Group C: remaining reporting features
 
 ```
---mode kcov --ordered --vmlinux  /bin/sh -c 'ls; ls'  → coverage-<TID>.html per task
+--mode kcov --ordered --vmlinux  vock selftest target vfs-fork  → coverage-<TID>.html per task
 --mode kcov --filter fs --vmlinux                     → coverage.html narrowed to fs/ paths
 ```
 
-The `--ordered` run uses a **forking target** and asserts the sequence
-semantics, not just file existence: at least two per-TID reports (the
-fan-out is real), duplicate PCs preserved (no dedup), the log in
+The `--ordered` run uses a **forking target** (`vfs-fork`, a fixed 2
+children plus the parent) and asserts the sequence semantics, not just file
+existence: one per-TID report per task (the fan-out is real and its size is
+known, not whatever a shell decided to fork), duplicate PCs preserved (no
+dedup), the log in
 chronological KCOV-buffer order (not sorted), and the per-TID HTML being
 the ordered execution-trace table.
 
@@ -132,8 +138,15 @@ Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0, HTML
 report, per-TID ordered report, and keyword filtering. `sud` traces up to the
 target's `execve`, so its `trace.log` is short by design; KCOV coverage is
 collected regardless of syscall backend. On kernels without
-`SYSCALL_USER_DISPATCH` (arm64 without `GENERIC_ENTRY`) the `sud` runs SKIP
-rather than fail.
+syscall user dispatch the `sud` runs SKIP rather than fail. On arm64 that
+skip is permanent and no kernel config changes it: SUD is built by
+`CONFIG_GENERIC_SYSCALL` (`kernel/entry/Makefile`), only `CONFIG_GENERIC_ENTRY`
+selects that symbol (`arch/Kconfig`), and neither has a prompt, so they cannot
+be set by hand. arm64 selects `GENERIC_IRQ_ENTRY` alone, leaving
+`set_syscall_user_dispatch()` as the `-EINVAL` stub in
+`include/linux/syscall_user_dispatch.h`. Enabling `sud` on arm64 needs the
+architecture converted to generic syscall entry upstream; x86_64, s390,
+riscv, loongarch and powerpc are converted today.
 
 ## Test 2: Intel PT / AMD LBR / CoreSight (host)
 
@@ -301,11 +314,26 @@ silently, those return `ENOSYS` and are named on startup. See
 
 ## Target Programs
 
-| Test | Target | Kernel subsystem |
-|------|--------|-----------------|
-| 1 | `/bin/touch "/tmp/$(date +%s).txt"` | vfs write path (openat O_CREAT, inode alloc, utimensat); the harness asserts inode/write functions appear in `srccov.log` |
-| 2 | `/bin/ls /tmp` | vfs / general syscall paths |
-| 3 | `vock selftest target crypto-decrypt` (AF_ALG xts(aes)) | crypto (skcipher, aes, xts) |
+Every traced workload is an explicit syscall sequence implemented in vock
+itself ([`vock/src/selftest/target.rs`](vock/src/selftest/target.rs)), not a
+borrowed coreutils program. A target is the experiment, so it must not vary
+with the guest: which syscalls `touch` issues depends on its build
+(utimensat vs utimes, statx vs fstat), busybox applets take different paths
+again, and a shell had to expand a command substitution just to make the
+file name unique. Each call below is present for the kernel path it must
+reach, and every target runs standalone:
+
+```bash
+vock selftest target vfs-write     # any of the three, no harness needed
+```
+
+| Test | Target | Syscalls | Kernel subsystem |
+|------|--------|----------|------------------|
+| 1 | `vock selftest target vfs-write` | openat(O_CREAT/O_WRONLY/O_TRUNC), write x4, fsync, futimens, fchmod, ftruncate, fstat, openat(O_RDONLY), read, unlink | vfs write path: path walk and `vfs_create`, inode allocation, `vfs_write`, writeback, inode timestamps, `notify_change` / `do_truncate`, `vfs_getattr`, `vfs_unlink`. The harness asserts inode/write functions appear in `srccov.log` |
+| 1 (`--ordered`) | `vock selftest target vfs-fork` | fork x2, each child the vfs-write sequence then `_exit`, then the parent's own | per-task fan-out: a fixed 3 tasks (2 children + parent), so "at least N per-TID reports" is a property of the target. Children ending via `_exit()` still produce their logs, the shim interposes it |
+| 2 | `vock selftest target vfs-read` | openat(O_DIRECTORY), getdents64 loop, openat(O_RDONLY), read loop, unlink | vfs read path: `iterate_dir` and the filldir path, `vfs_read` |
+| 3 | `vock selftest target crypto-decrypt` (AF_ALG xts(aes)) | socket(AF_ALG), bind, setsockopt, accept, sendmsg, read | crypto (skcipher, aes, xts) |
+| 5 | `vock selftest target rust-touch` | openat, write, read, ioctl x3 | Rust misc device (`write_iter`, `read_iter`, ioctl handler) |
 
 ## Kernel Configuration
 
@@ -333,7 +361,7 @@ CONFIG_KCOV=n, CONFIG_PERF_EVENTS=y, CONFIG_DEBUG_INFO=y, CONFIG_DEBUG_INFO_BTF=
 | `--mode kcov` | `KCOV`, `KCOV_INSTRUMENT_ALL`, `DEBUG_INFO` |
 | `--btf` | `DEBUG_INFO_BTF` |
 | `--syscall ptrace` | (none) |
-| `--syscall sud` | kernel ≥ 5.11 with `SYSCALL_USER_DISPATCH` (x86_64; arm64 kernels without `GENERIC_ENTRY` SKIP) |
+| `--syscall sud` | kernel ≥ 5.11 with `CONFIG_GENERIC_SYSCALL`, which only `CONFIG_GENERIC_ENTRY` selects (x86_64, s390, riscv, loongarch, powerpc). arm64 selects `GENERIC_IRQ_ENTRY` alone and always SKIPs; no config can change that |
 | `--syscall ebpf` | `BPF_SYSCALL`, `DEBUG_INFO_BTF` |
 | crypto target | `CRYPTO_XTS`, `CRYPTO_AES`, `CRYPTO_USER_API_SKCIPHER` (AF_ALG) |
 

@@ -88,10 +88,27 @@ fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
 pub fn resolve_pcs(pcs: &[String], kallsyms_path: &str) -> Vec<(String, Option<String>)> {
     let syms = load_kallsyms(kallsyms_path);
     if syms.is_empty() {
-        eprintln!(
-            "btf: no usable symbols in {kallsyms_path} (missing CONFIG_KALLSYMS, \
-             or addresses hidden by kptr_restrict)"
-        );
+        // Say which of the two failure modes it is: no file at all versus a
+        // file whose addresses are all zero. The second is the common one
+        // and is a permission setting, not a missing kernel feature.
+        let lines = std::fs::read_to_string(kallsyms_path)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+        let restrict = std::fs::read_to_string("/proc/sys/kernel/kptr_restrict")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| "?".into());
+        if lines == 0 {
+            eprintln!(
+                "btf: {kallsyms_path} is empty or unreadable; the kernel needs \
+                 CONFIG_KALLSYMS=y"
+            );
+        } else {
+            eprintln!(
+                "btf: all {lines} symbols in {kallsyms_path} read as address 0 \
+                 (kptr_restrict={restrict}); run as root or set \
+                 kernel.kptr_restrict=0 to symbolize via kallsyms"
+            );
+        }
         return pcs.iter().map(|p| (p.clone(), None)).collect();
     }
     let sym_addrs: Vec<u64> = syms.iter().map(|s| s.0).collect();

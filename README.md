@@ -28,8 +28,13 @@ checks included) and on AMD: one run covers a host pass and a KVM-guest pass acr
 backends, 26/26 checks pass as a normal user with the privileges described
 under [eBPF Syscall Backend](#ebpf-syscall-backend---syscall-ebpf). The `sud`
 backend traces up to and including the target's `execve` (the LD_PRELOAD
-re-injection that keeps tracing past exec is not yet ported). CoreSight
-(arm64) is ported and builds; it is validated in follow-up work.
+re-injection that keeps tracing past exec is not yet ported), and it needs
+an architecture converted to generic syscall entry: SUD is compiled by
+`CONFIG_GENERIC_SYSCALL`, which only `CONFIG_GENERIC_ENTRY` selects, so it
+works on x86_64, s390, riscv, loongarch and powerpc, while arm64 (which
+selects `GENERIC_IRQ_ENTRY` alone) SKIPs no matter how the kernel is
+configured. CoreSight (arm64) is ported and builds; it is validated in
+follow-up work.
 
 `vock execprog` is a **syz-execprog-style executor**: it replays a program
 with `-repeat`/`-procs` and can attribute KCOV coverage to each call. An
@@ -99,7 +104,10 @@ sudo ./vock.bin --mode kcov /bin/ip addr show
 # → kerncov.log (local + remote) + coverage.html
 ```
 
-Tracks coverage across `fork()` and `pthread_create()`, each child gets its own KCOV instance (`local-<TID>.log`).
+Tracks coverage across `fork()` and `pthread_create()`, each child gets its
+own KCOV instance (`local-<TID>.log`). A task's log is written when the task
+ends, including when it ends through `_exit()` rather than `exit()`, which is
+how a forked child normally ends and how dash ends.
 
 ### 3. Syscall Tracking
 

@@ -23,7 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use target::{
-    help_raw_commands, COVERAGE_TARGET, CRYPTO_TARGET_ARGS, KASAN_SAMPLE, KCOV_TARGET,
+    help_raw_commands, target_cmd, COVERAGE_TARGET_ARGS, CRYPTO_TARGET_ARGS,
+    FORK_CHILDREN, FORK_TARGET_ARGS, KASAN_SAMPLE, KCOV_TARGET_ARGS,
     RUST_TARGET_ARGS, SUD_SETUP,
 };
 
@@ -513,7 +514,7 @@ impl Harness {
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
         let vb = self.vock_bin.clone();
-        let tgt = KCOV_TARGET;
+        let tgt = target_cmd(&vb, KCOV_TARGET_ARGS);
 
         println!("\n── Group A: KCOV + vmlinux + syzlang ──");
         let diag = self.vng_run(&sv(&[
@@ -551,22 +552,26 @@ impl Harness {
         // report and a keyword-filtered report.
         println!("\n── Group C: KCOV reporting (--ordered, --filter) ──");
         println!("\n[Test: --mode kcov --ordered --vmlinux (sequence semantics)]");
-        // A forking target: two /bin/ls children give two traced TIDs, so
-        // the per-TID fan-out is actually exercised. The sequence checks
-        // assert what --ordered exists for: the largest per-TID log keeps
-        // duplicate PCs (no dedup) and is NOT sorted (chronological KCOV
-        // buffer order), and the per-TID HTML is the ordered-trace table.
+        // A forking target: vfs-fork forks a fixed FORK_CHILDREN children,
+        // each running the write-path sequence, so the per-TID fan-out is a
+        // property of the target rather than of whichever shell the guest
+        // ships. The sequence checks assert what --ordered exists for: the
+        // largest per-TID log keeps duplicate PCs (no dedup) and is NOT
+        // sorted (chronological KCOV buffer order), and the per-TID HTML is
+        // the ordered-trace table.
+        let fork_tgt = target_cmd(&vb, FORK_TARGET_ARGS);
+        let want_tids = FORK_CHILDREN + 1; // children plus the parent task
         let script = format!(
-            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} /bin/sh -c '/bin/ls /tmp; /bin/ls /tmp' 2>&1 >/dev/null; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l); L=$(ls -S local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then [ $(wc -l < $L) -gt $(sort -u $L | wc -l) ] && echo ORDERED_DUPS_OK; sort $L | cmp -s - $L || echo ORDERED_SEQ_OK; fi; grep -l 'Ordered Kernel Execution Trace' coverage-*.html >/dev/null 2>&1 && echo ORDERED_HTML_OK"
+            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} {fork_tgt} 2>&1 >/dev/null; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l); L=$(ls -S local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then [ $(wc -l < $L) -gt $(sort -u $L | wc -l) ] && echo ORDERED_DUPS_OK; sort $L | cmp -s - $L || echo ORDERED_SEQ_OK; fi; grep -l 'Ordered Kernel Execution Trace' coverage-*.html >/dev/null 2>&1 && echo ORDERED_HTML_OK"
         );
         let r = self.vng_run(&sv(&["bash", "-c", &script]));
         self.vlog(&r, false);
         let out = r.stdout_str();
         if let Some(v) = field(&out, "ORDERED_OK=") {
-            if v.parse::<i64>().unwrap_or(0) >= 2 {
-                self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html (forked target)"));
+            if v.parse::<usize>().unwrap_or(0) >= want_tids {
+                self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html (vfs-fork: {want_tids} tasks)"));
             } else {
-                self.log("FAIL", &format!("--ordered: only {v} per-TID report from a forking target"));
+                self.log("FAIL", &format!("--ordered: {v} per-TID reports, vfs-fork makes {want_tids} tasks"));
                 self.vlog(&r, true);
             }
         } else {
@@ -639,7 +644,7 @@ impl Harness {
     fn eval_cov_syscall(&mut self, r: &Out, label: &str) {
         let out = r.stdout_str();
         if out.contains("SUD (SYSCALL_USER_DISPATCH) not supported") {
-            self.log("SKIP", &format!("{label}: SUD not supported by this kernel/arch (needs SYSCALL_USER_DISPATCH; arm64 needs GENERIC_ENTRY)"));
+            self.log("SKIP", &format!("{label}: SUD unavailable, no kernel config enables it here. syscall user dispatch is built by CONFIG_GENERIC_SYSCALL (kernel/entry/Makefile), which only CONFIG_GENERIC_ENTRY selects (arch/Kconfig); arm64 selects GENERIC_IRQ_ENTRY alone, so set_syscall_user_dispatch() is the -EINVAL stub. Needs the arch converted to generic syscall entry, x86_64/s390/riscv/loongarch/powerpc have it"));
             return;
         }
         if out.contains("tracefs not readable") {
@@ -795,7 +800,7 @@ impl Harness {
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
         let vb = self.vock_bin.clone();
-        let tgt = COVERAGE_TARGET;
+        let tgt = target_cmd(&vb, COVERAGE_TARGET_ARGS);
         let tag = if side.is_empty() { String::new() } else { format!(" ({side})") };
         println!("\n[Test: --mode hw --ordered{tag}]");
         let script = format!(
@@ -847,7 +852,7 @@ impl Harness {
         let vmlinux = self.vmlinux.clone();
         let ks = self.kernel_src.clone();
         let vb = self.vock_bin.clone();
-        let tgt = COVERAGE_TARGET;
+        let tgt = target_cmd(&vb, COVERAGE_TARGET_ARGS);
         let tag = if side.is_empty() { String::new() } else { format!(" ({side})") };
         let perf_pre = "echo -1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || sudo -n sh -c 'echo -1 > /proc/sys/kernel/perf_event_paranoid' 2>/dev/null || true; ";
         for backend in ["ptrace", "sud", "ebpf"] {
