@@ -424,6 +424,11 @@ fn merge_logs() {
             }
             if let Ok(data) = std::fs::read(ent.path()) {
                 let _ = w.write_all(&data);
+                // Keep a truncated log (task killed mid-write) from gluing
+                // onto the next file's first PC line.
+                if !data.is_empty() && !data.ends_with(b"\n") {
+                    let _ = w.write_all(b"\n");
+                }
             }
         }
     }

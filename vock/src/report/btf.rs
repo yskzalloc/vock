@@ -29,50 +29,100 @@ fn load_kallsyms(path: &str) -> Vec<(u64, String)> {
     syms
 }
 
-fn parse_pc(pc: &str) -> u64 {
+fn parse_pc(pc: &str) -> Option<u64> {
     let s = pc.trim_start_matches("0x").trim_start_matches("0X");
-    u64::from_str_radix(s, 16).unwrap_or(0)
+    u64::from_str_radix(s, 16).ok()
 }
 
-/// Ranked (function, hits) list. Applies the same KASLR heuristic as btf.py.
-pub fn generate_report(pcs: &[String], kallsyms_path: &str) -> Vec<(String, usize)> {
-    let syms = load_kallsyms(kallsyms_path);
-    if syms.is_empty() {
-        return Vec::new();
-    }
-    let sym_addrs: Vec<u64> = syms.iter().map(|s| s.0).collect();
-    let int_pcs: Vec<u64> = pcs.iter().map(|p| parse_pc(p)).collect();
-
+/// KASLR offset between the log's PCs and the loaded kallsyms.
+///
+/// The common case, a log from the *running* kernel, needs no offset at all:
+/// KCOV PCs and /proc/kallsyms describe the same live image, KASLR or not,
+/// on every architecture. So when the majority of PCs already fall inside
+/// the kallsyms text range the offset is 0, and a stray malformed PC (a
+/// merge-glued line, a truncated write) cannot poison the whole report. The
+/// old min-PC heuristic compared against the hardcoded x86 text base
+/// 0xffffffff81000000, so one sub-text PC on arm64 shifted every address by
+/// about -128 TiB and resolved 0 functions; on x86 the same poison happened
+/// to compute the correct slide, which is why only arm64 CI caught it.
+///
+/// A foreign log (PCs from another boot of the kernel) keeps the legacy
+/// heuristic, on x86_64 only, where its text-base constant is meaningful.
+fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
+    let Some(min_pc) = int_pcs.iter().copied().min() else {
+        return 0;
+    };
+    let last = syms.last().unwrap().0;
     let mut text_addr: Option<u64> = None;
-    for (addr, name) in &syms {
+    for (addr, name) in syms {
         if name == "_text" || name == "_stext" {
             text_addr = Some(*addr);
             break;
         }
     }
+    let Some(text_addr) = text_addr else { return 0 };
 
-    let mut offset: i64 = 0;
-    if let (Some(text_addr), false) = (text_addr, int_pcs.is_empty()) {
-        let min_pc = *int_pcs.iter().min().unwrap();
-        if min_pc < text_addr {
-            offset = text_addr as i64 - 0xffff_ffff_8100_0000u64 as i64;
-        } else if min_pc > syms.last().unwrap().0 {
-            offset = -((min_pc - text_addr) as i64);
-        }
+    let in_text = int_pcs
+        .iter()
+        .filter(|&&pc| pc >= text_addr && pc <= last)
+        .count();
+    if in_text * 2 >= int_pcs.len() {
+        return 0; // same-kernel log
     }
+    if min_pc < text_addr {
+        if cfg!(target_arch = "x86_64") {
+            text_addr as i64 - 0xffff_ffff_8100_0000u64 as i64
+        } else {
+            0
+        }
+    } else if min_pc > last {
+        -((min_pc - text_addr) as i64)
+    } else {
+        0
+    }
+}
 
+/// Resolve each PC to its kallsyms function, parallel to the input; `None`
+/// for unparseable tokens and addresses outside the symbol table. This is
+/// the shared base of the ranked report and BTF-mode `srccov.log`.
+pub fn resolve_pcs(pcs: &[String], kallsyms_path: &str) -> Vec<(String, Option<String>)> {
+    let syms = load_kallsyms(kallsyms_path);
+    if syms.is_empty() {
+        eprintln!(
+            "btf: no usable symbols in {kallsyms_path} (missing CONFIG_KALLSYMS, \
+             or addresses hidden by kptr_restrict)"
+        );
+        return pcs.iter().map(|p| (p.clone(), None)).collect();
+    }
+    let sym_addrs: Vec<u64> = syms.iter().map(|s| s.0).collect();
+    let int_pcs: Vec<u64> = pcs.iter().filter_map(|p| parse_pc(p)).collect();
+    let offset = kaslr_offset(&int_pcs, &syms);
+
+    pcs.iter()
+        .map(|p| {
+            let name = parse_pc(p).and_then(|pc| {
+                let adj = (pc as i64 + offset) as u64;
+                let idx = sym_addrs.partition_point(|&a| a <= adj);
+                if idx == 0 {
+                    None
+                } else {
+                    Some(syms[idx - 1].1.clone())
+                }
+            });
+            (p.clone(), name)
+        })
+        .collect()
+}
+
+/// Ranked (function, hits) list from a per-PC resolution.
+pub fn rank(resolved: &[(String, Option<String>)]) -> Vec<(String, usize)> {
     use std::collections::HashMap;
     let mut hits: HashMap<&str, usize> = HashMap::new();
-    for &pc in &int_pcs {
-        let adj = (pc as i64 + offset) as u64;
-        let idx = sym_addrs.partition_point(|&a| a <= adj);
-        if idx == 0 {
-            continue;
+    for (_, name) in resolved {
+        if let Some(name) = name {
+            *hits.entry(name.as_str()).or_insert(0) += 1;
         }
-        let name = syms[idx - 1].1.as_str();
-        *hits.entry(name).or_insert(0) += 1;
     }
-
     let mut ranked: Vec<(String, usize)> =
         hits.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
     // Sort by hit count descending; stable order for ties.
@@ -267,5 +317,89 @@ pub fn generate_html(ranked: &[(String, usize)], kernel_src: &str, output_path: 
     html.push("</body></html>".into());
     if let Ok(mut f) = std::fs::File::create(output_path) {
         let _ = f.write_all(html.join("\n").as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_kallsyms(name: &str, lines: &str) -> String {
+        let path = std::env::temp_dir()
+            .join(format!("vock-btf-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, lines).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    fn sv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// arm64 CI regression: a same-kernel log with one malformed line must
+    /// still resolve. The old min-PC heuristic saw the poison parse as a
+    /// low value and shifted every PC by (_text - x86 text base), which on
+    /// arm64 pushed the whole log below the symbol table: 0 functions.
+    #[test]
+    fn same_kernel_arm64_log_survives_poison_line() {
+        let ks = fake_kallsyms(
+            "arm64",
+            "ffff800080000000 T _text\n\
+             ffff800080010000 T alpha\n\
+             ffff800080020000 T beta\n\
+             ffff800082000000 B _end\n",
+        );
+        let pcs = sv(&[
+            "0xffff800080010004",
+            "0xffff800080010008",
+            "0xffff800080020010",
+            "0xffff800080010004\u{30}xffff800080020010", // merge-glued line
+        ]);
+        let resolved = resolve_pcs(&pcs, &ks);
+        let ranked = rank(&resolved);
+        std::fs::remove_file(&ks).unwrap();
+        assert_eq!(resolved[0].1.as_deref(), Some("alpha"));
+        assert_eq!(resolved[2].1.as_deref(), Some("beta"));
+        assert_eq!(resolved[3].1, None, "poison line resolves to nothing");
+        let alpha = ranked.iter().find(|(f, _)| f == "alpha").unwrap();
+        assert_eq!(alpha.1, 2);
+    }
+
+    /// A numeric-but-bogus low PC (below _text) must not poison the offset
+    /// either, the majority of in-range PCs decides.
+    #[test]
+    fn same_kernel_log_survives_low_pc() {
+        let ks = fake_kallsyms(
+            "lowpc",
+            "ffff800080000000 T _text\n\
+             ffff800080010000 T alpha\n\
+             ffff800082000000 B _end\n",
+        );
+        let pcs = sv(&["0x10", "0xffff800080010004", "0xffff800080010008"]);
+        let resolved = resolve_pcs(&pcs, &ks);
+        std::fs::remove_file(&ks).unwrap();
+        assert_eq!(resolved[0].1, None);
+        assert_eq!(resolved[1].1.as_deref(), Some("alpha"));
+    }
+
+    /// x86 foreign-log case the legacy heuristic exists for: an unslid log
+    /// resolved against a KASLR-slid kallsyms still maps via the text-base
+    /// constant. x86_64-only, the constant is meaningless elsewhere.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn foreign_x86_log_uses_legacy_slide() {
+        let slide = 0x4000000u64;
+        let ks = fake_kallsyms(
+            "x86",
+            &format!(
+                "{:x} T _text\n{:x} T alpha\n{:x} B _end\n",
+                0xffffffff81000000u64 + slide,
+                0xffffffff81010000u64 + slide,
+                0xffffffff83000000u64 + slide,
+            ),
+        );
+        let pcs = sv(&["0xffffffff81010004"]);
+        let resolved = resolve_pcs(&pcs, &ks);
+        std::fs::remove_file(&ks).unwrap();
+        assert_eq!(resolved[0].1.as_deref(), Some("alpha"));
     }
 }

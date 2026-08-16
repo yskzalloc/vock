@@ -250,6 +250,12 @@ fn merge_tid_logs() {
             }
             if let Ok(data) = std::fs::read(ent.path()) {
                 let _ = w.write_all(&data);
+                // A log cut mid-line (a task killed inside its exit writer)
+                // must not glue onto the next file's first PC: one malformed
+                // token used to poison the BTF resolver's KASLR heuristic.
+                if !data.is_empty() && !data.ends_with(b"\n") {
+                    let _ = w.write_all(b"\n");
+                }
             }
         }
     }

@@ -191,7 +191,21 @@ pub fn run(opts: &Options) -> i32 {
 
     // ── BTF mode (resolve via kallsyms) ─────────────────────────────────────
     if opts.btf {
-        let ranked = btf::generate_report(&addrs, "/proc/kallsyms");
+        let resolved = btf::resolve_pcs(&addrs, "/proc/kallsyms");
+        let ranked = btf::rank(&resolved);
+        // Transform-layer twin, same as vmlinux mode: srccov.log carries the
+        // best symbolization available. kallsyms gives function granularity
+        // only, no file:line without a vmlinux.
+        {
+            use std::io::Write;
+            let sc = symbolize::srccov_path(Path::new(&opts.log));
+            if let Ok(f) = std::fs::File::create(&sc) {
+                let mut w = std::io::BufWriter::new(f);
+                for (pc, name) in &resolved {
+                    let _ = writeln!(w, "{pc} {}", name.as_deref().unwrap_or("??"));
+                }
+            }
+        }
         if !opts.quiet {
             println!(
                 "\n\x1b[93m📊 [VOCK] BTF report ({} PCs → {} functions)\x1b[0m\n",

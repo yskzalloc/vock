@@ -475,7 +475,7 @@ impl Harness {
             println!("\n[Test: --mode kcov --syzlang --syscall {backend} --btf --kernel-src]");
             let sud_pre = if backend == "sud" { SUD_SETUP } else { "" };
             let script = format!(
-                "rm -f kerncov.log srccov.log asmcov.log coverage.html trace.log trace.syz && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK; {{ grep -qiE 'inode|utimes|vfs_' srccov.log 2>/dev/null || grep -qiE 'inode|utimes|vfs_' coverage.html 2>/dev/null; }} && echo VFS_OK"
+                "rm -f kerncov.log srccov.log asmcov.log coverage.html trace.log trace.syz local-*.log remote-*.log && {sud_pre}{vb} --mode kcov --syzlang --syscall {backend} --btf --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < kerncov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz) && [ -f coverage.html ] && echo HTML_OK; {{ grep -qiE 'inode|utimes|vfs_' srccov.log 2>/dev/null || grep -qiE 'inode|utimes|vfs_' coverage.html 2>/dev/null; }} && echo VFS_OK"
             );
             let r = self.vng_run(&sv(&["bash", "-c", &script]));
             self.vlog(&r, false);

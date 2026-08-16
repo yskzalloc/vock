@@ -83,6 +83,14 @@ features across three groups.
 --mode kcov --syzlang --syscall ebpf --btf --kernel-src    → kerncov.log + trace.log + trace.syz + coverage.html
 ```
 
+BTF mode resolves PCs against the running kernel's `/proc/kallsyms` (no
+vmlinux, no addr2line) and also writes `srccov.log` at kallsyms
+granularity, `0x<pc> <function>` per unique PC, so the inode/write-path
+assertion works in this group too. Resolution applies no KASLR offset
+when the PCs already fall inside the kallsyms range, which is always the
+case for a same-kernel log on any architecture; the x86 text-base
+heuristic is reserved for foreign x86 logs.
+
 ### Group C: remaining reporting features
 
 ```

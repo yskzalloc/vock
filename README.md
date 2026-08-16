@@ -452,7 +452,7 @@ created if missing, this also applies to `vock report`.
 | `kerncov_prog1.<N>` | Per-call coverage from `execprog -cover` |
 | `kerncov_prog1.extra` | Background coverage belonging to no single call |
 | `coverage.html` | Source-annotated coverage report (C source only) |
-| `srccov.log` | Source-line twin of `kerncov.log`: `0x<pc> <function> <file>:<line>`, same order |
+| `srccov.log` | Source-line twin of `kerncov.log`: `0x<pc> <function> <file>:<line>`, same order. `--btf` mode writes it too, at kallsyms granularity: `0x<pc> <function>` per unique PC (no file:line without a vmlinux) |
 | `srccov-local-<TID>.log` | Source-line twin of a per-TID ordered log |
 | `asmcov.log` | Assembly PCs split out of the report: `0x<pc> <function> <file>:<line>: <asm text>` |
 | `coverage-<TID>.html` | Per-thread ordered trace from `--mode kcov --ordered` |
