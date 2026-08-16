@@ -16,6 +16,7 @@ mode/*.so
 /vock.bin
 
 # ─── coverage / trace outputs ────────────────────────────────────────
+*.cast
 *.log
 *.syz
 !selftest/samples/*.syz

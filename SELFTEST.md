@@ -49,8 +49,32 @@ separate from the harness.
 | `--vmlinux` | `<kernel-src>/vmlinux` | vmlinux with debug info |
 | `--llvm` | auto-detect | LLVM suffix (e.g. `-21`) or path. Also reads `LLVM` env |
 | `--no-build` | off | Skip the `make` step and use the existing `./vock.bin` |
+| `--record` | off | Record each selected test with asciinema into `selftest<N>.cast` |
 | `-v` | off | Verbose: show command output for debugging |
 | `1`-`4` | all | Run a specific test only |
+
+## Recording (asciinema)
+
+`--record` re-runs each selected test under `asciinema rec` and writes one
+`selftest<N>.cast` (asciicast v3) per test into the current directory:
+
+```bash
+vock selftest 1 --record --kernel-src ~/stable    # selftest1.cast
+vock selftest --record --kernel-src ~/stable      # selftest1.cast ... selftest5.cast
+asciinema play selftest1.cast                     # replay
+```
+
+Each cast is a self-contained demo: it opens with the reproducible raw
+command for the test (the same text `vock selftest --help` and
+`vock selftest raw <n>` print), then records the full test run, and closes
+with a `head`/`tail` tour of the artifacts the run produced (`kerncov.log`,
+`srccov.log`, `asmcov.log`, `trace.log`, `trace.syz`, `coverage.html`), so
+the files are visible in the cast even where no verdict sampled them.
+Recording needs `asciinema` on PATH (`cargo install asciinema`,
+`pipx install asciinema`, or the distro package) and works headless, so it
+runs in CI too; vock is built once by the wrapper and the recorded child
+runs with `--no-build`. The child's exit code is propagated
+(`asciinema rec --return`), so `--record` still fails when a test fails.
 
 ## Test Numbers
 

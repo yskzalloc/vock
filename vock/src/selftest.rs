@@ -54,6 +54,11 @@ fn run(cmd: &[String], cwd: Option<&str>, timeout: Duration) -> Out {
     // whole tree (e.g. vng → virtme-run → qemu), not just the direct child,
     // otherwise a timed-out vng leaks an orphaned qemu.
     c.process_group(0);
+    // No harness child ever reads the terminal, and stdin must never be a
+    // live TTY: under `--record`, asciinema runs the whole selftest on a
+    // pty, virtme-run sees isatty(0), switches to interactive console
+    // handling and never returns, so every guest run times out.
+    c.stdin(Stdio::null());
     c.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match c.spawn() {
         Ok(ch) => ch,
@@ -129,6 +134,27 @@ fn run(cmd: &[String], cwd: Option<&str>, timeout: Duration) -> Out {
 
 fn sv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| s.to_string()).collect()
+}
+
+/// Render an argv as a copy-pasteable shell command line: arguments that
+/// need it are single-quoted (with the '\'' escape for embedded quotes),
+/// everything else stays bare. Used to echo each test's REAL command under
+/// its [Test: ...] header.
+fn shell_join(cmd: &[String]) -> String {
+    cmd.iter()
+        .map(|a| {
+            let safe = !a.is_empty()
+                && a.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || b"_-./:=+,@%^".contains(&b)
+                });
+            if safe {
+                a.clone()
+            } else {
+                format!("'{}'", a.replace('\'', r"'\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ─── environment detection ──────────────────────────────────────────────────
@@ -289,6 +315,37 @@ impl Harness {
     /// Print up to `n` sample lines of a run artifact (files land in the
     /// kernel tree, which vng shares with the host), so a PASS comes with
     /// the actual data a human would check, not just the verdict.
+    /// End-of-recording artifact tour: run real `head`/`tail` commands over
+    /// the coverage artifacts in the kernel tree and echo their output, so
+    /// an asciinema cast shows the produced files themselves, independent of
+    /// which verdicts sampled them during the test.
+    fn showcase_artifacts(&self) {
+        println!("\n[Artifacts]");
+        let show = |tool: &str, name: &str| {
+            let p = Path::new(&self.kernel_src).join(name);
+            if !p.is_file() {
+                return;
+            }
+            let p = p.to_string_lossy().into_owned();
+            println!("\n  $ {tool} -n 8 {p}");
+            let r = run(
+                &sv(&[tool, "-n", "8", &p]),
+                None,
+                Duration::from_secs(10),
+            );
+            for l in r.stdout_str().lines() {
+                let t: String = l.chars().take(110).collect();
+                println!("  {t}");
+            }
+        };
+        for f in ["kerncov.log", "srccov.log", "asmcov.log", "trace.log", "trace.syz"] {
+            show("head", f);
+        }
+        for f in ["coverage.html"] {
+            show("tail", f);
+        }
+    }
+
     fn sample(&self, name: &str, n: usize) {
         let p = Path::new(&self.kernel_src).join(name);
         let Ok(s) = std::fs::read_to_string(&p) else { return };
@@ -371,6 +428,7 @@ impl Harness {
         }
         cmd.push("--build".into());
         cmd.push(format!("LLVM={}", self.llvm_suffix));
+        println!("    $ {}", shell_join(&cmd));
         let r = run(&cmd, Some(&self.kernel_src), Duration::from_secs(3600));
         if r.code != 0 {
             self.vlog(&r, true);
@@ -391,8 +449,14 @@ impl Harness {
     /// Run `cmd` on an explicit side: directly on the host, or inside the
     /// vng guest regardless of --on. Lets one test drive both (test 2 runs
     /// AMD LBR on the host and in the KVM guest in a single invocation).
+    ///
+    /// Every execution first echoes the REAL command line ("$ ..."), the
+    /// full vng wrapper included, so each [Test: ...] header is followed by
+    /// something that can be copy-pasted and replayed as-is (cwd is the
+    /// kernel tree).
     fn exec_to(&self, on_host: bool, cmd: &[String], timeout: Duration) -> Out {
         if on_host {
+            println!("    $ {}", shell_join(cmd));
             return run(cmd, Some(&self.kernel_src), timeout);
         }
         // 4G: the report step runs addr2line over the DWARF5 vmlinux inside
@@ -406,6 +470,7 @@ impl Harness {
         }
         vng.push("--".into());
         vng.extend_from_slice(cmd);
+        println!("    $ {}", shell_join(&vng));
         let r = run(&vng, Some(&self.kernel_src), timeout);
         if r.code == -1 && r.stderr == b"TIMEOUT" {
             println!("    TIMEOUT: vng command exceeded the timeout");
@@ -1274,6 +1339,7 @@ pub fn main(args: &[String]) -> i32 {
     let mut llvm_arg: Option<String> = None;
     let mut verbose = false;
     let mut no_build = false;
+    let mut record = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -1300,6 +1366,7 @@ pub fn main(args: &[String]) -> i32 {
             }
             "-v" | "--verbose" => verbose = true,
             "--no-build" => no_build = true,
+            "--record" => record = true,
             t @ ("1" | "2" | "3" | "4" | "5") => test = Some(t.to_string()),
             other => {
                 eprintln!("vock selftest: unrecognized argument '{other}'");
@@ -1394,6 +1461,25 @@ pub fn main(args: &[String]) -> i32 {
         return 1;
     }
 
+    // `--record`: re-run each selected test under `asciinema rec`, one
+    // `selftest<N>.cast` per test in the current directory. The recorded
+    // child (marked by VOCK_SELFTEST_RECORDING) prints the raw command
+    // from `--help` first and ends with a head/tail tour of the artifacts,
+    // so a cast is a self-contained demo of the test. vock was already
+    // built above, so the children run with --no-build.
+    if record && std::env::var("VOCK_SELFTEST_RECORDING").is_err() {
+        return record_casts(
+            &vock_bin,
+            test.as_deref(),
+            &on,
+            &kernel_src,
+            &vmlinux,
+            &llvm_suffix,
+            verbose,
+        );
+    }
+    let recording = std::env::var("VOCK_SELFTEST_RECORDING").is_ok();
+
     let mut h = Harness {
         pass: 0,
         fail: 0,
@@ -1407,6 +1493,17 @@ pub fn main(args: &[String]) -> i32 {
         vock_bin,
         arch,
     };
+
+    // Inside a recording, open with the raw command the cast reproduces,
+    // the same text `vock selftest --help` and `vock selftest raw <n>` print.
+    if recording {
+        if let Some(rawc) = test.as_deref().and_then(target::raw_command) {
+            println!("\n[Raw command (from `vock selftest --help`)]");
+            for line in rawc.lines() {
+                println!("  {line}");
+            }
+        }
+    }
 
     match test.as_deref() {
         Some("1") => {
@@ -1431,6 +1528,12 @@ pub fn main(args: &[String]) -> i32 {
             h.test_fuzz_kasan();
             h.test_rust_module();
         }
+    }
+
+    // Close a recording with a head/tail tour of the artifacts, so the cast
+    // shows the actual files regardless of which checks sampled them.
+    if recording {
+        h.showcase_artifacts();
     }
 
     println!("\n{}", "=".repeat(60));
@@ -1475,10 +1578,72 @@ fn shellexpand_home(p: &str, home: &str) -> String {
     }
 }
 
+/// `--record`: run each selected test under `asciinema rec`, writing
+/// `selftest<N>.cast` (asciicast) into the current directory. The child is
+/// the same binary with the same resolved flags plus --no-build (vock was
+/// built by the wrapper), marked with VOCK_SELFTEST_RECORDING so it opens
+/// with the raw command and closes with the artifact tour. Returns the
+/// worst child exit code; `--return` makes asciinema propagate it.
+#[allow(clippy::too_many_arguments)]
+fn record_casts(
+    vock_bin: &str,
+    test: Option<&str>,
+    on: &str,
+    kernel_src: &str,
+    vmlinux: &str,
+    llvm: &str,
+    verbose: bool,
+) -> i32 {
+    if which("asciinema").is_none() {
+        eprintln!("selftest --record: asciinema not found on PATH");
+        eprintln!("  install: cargo install asciinema, pipx install asciinema,");
+        eprintln!("  or the distro package (apt install asciinema)");
+        return 1;
+    }
+    let tests: Vec<&str> = match test {
+        Some(t) => vec![t],
+        None => vec!["1", "2", "3", "4", "5"],
+    };
+    let mut worst = 0;
+    for t in &tests {
+        let cast = format!("selftest{t}.cast");
+        let inner = format!(
+            "{vock_bin} selftest {t} --on {on} --kernel-src '{kernel_src}' \
+             --vmlinux '{vmlinux}' --llvm '{llvm}' --no-build{}",
+            if verbose { " -v" } else { "" }
+        );
+        println!("[record] {cast} <- {inner}");
+        let st = Command::new("asciinema")
+            .arg("rec")
+            .arg("--overwrite")
+            .arg("--return")
+            .arg("--title")
+            .arg(format!("vock selftest {t}"))
+            .arg("-c")
+            .arg(&inner)
+            .arg(&cast)
+            .env("VOCK_SELFTEST_RECORDING", "1")
+            .status();
+        let code = match st {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("[record] asciinema failed to start: {e}");
+                1
+            }
+        };
+        if code != 0 && worst == 0 {
+            worst = code;
+        }
+        println!("[record] wrote {cast} (exit {code})");
+    }
+    worst
+}
+
 fn print_help() {
     eprint!(
         "usage: vock selftest [-h] [--on {{host,vng-kvm,vng-tcg}}] [--kernel-src PATH]\n\
-                     [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-5]\n\n\
+                     [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [--record]\n\
+                     [-v] [1-5]\n\n\
 tests:\n\
   1  coverage + syscall  build a KCOV kernel; exercise every KCOV collection and\n\
                          reporting feature: KCOV+vmlinux and KCOV+BTF across each\n\
@@ -1498,7 +1663,12 @@ tests:\n\
                          and assert .rs source lines appear in the coverage\n\n\
 options:\n\
   --no-build  do not re-run make; use the existing ./vock.bin. Needed when\n\
-              cargo is not on PATH, e.g. under sudo (secure_path).\n\n\
+              cargo is not on PATH, e.g. under sudo (secure_path).\n\
+  --record    record each selected test with asciinema into selftest<N>.cast\n\
+              in the current directory. The cast opens with the raw command\n\
+              shown below and ends with a head/tail tour of the artifacts\n\
+              (kerncov.log, srccov.log, trace.log, coverage.html).\n\
+              Needs asciinema on PATH; works headless (no TTY required).\n\n\
 --on target:\n\
   host      run directly on the host (needed for Intel PT / CoreSight)\n\
   vng-kvm   VM tests use KVM acceleration (default)\n\
