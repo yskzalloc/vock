@@ -114,10 +114,34 @@ pub fn generate(
 }
 
 /// Ordered execution-trace HTML (port of output.py's --ordered branch).
+/// Rows the ordered trace table renders before it stops.
+///
+/// A traced program's own startup is hundreds of thousands of PCs, and one
+/// row costs about 700 bytes of markup, so an uncapped table reaches 160 MB
+/// for a single task: too large for a browser to open, and slow enough to
+/// write that a VM guest sharing its filesystem over 9p spends minutes on
+/// it. The complete sequence is never lost, it is the log this report was
+/// made from plus its srccov twin; this file is the human-facing view of
+/// the head of the trace. Override with VOCK_ORDERED_HTML_ROWS (0 = all).
+const ORDERED_HTML_ROWS: usize = 20_000;
+
+fn ordered_html_rows() -> usize {
+    match std::env::var("VOCK_ORDERED_HTML_ROWS") {
+        Ok(v) => match v.trim().parse::<usize>() {
+            Ok(0) => usize::MAX,
+            Ok(n) => n,
+            Err(_) => ORDERED_HTML_ROWS,
+        },
+        Err(_) => ORDERED_HTML_ROWS,
+    }
+}
+
 pub fn generate_ordered(addrs: &[String], lines: &[String], output_path: &str) {
     let Ok(f) = std::fs::File::create(output_path) else {
         return;
     };
+    let max = ordered_html_rows();
+    let shown = lines.len().min(max);
     let mut w = std::io::BufWriter::new(f);
     let _ = w.write_all(b"<!DOCTYPE html><html><head><meta charset='utf-8'>\n");
     let _ = w.write_all(b"<title>vock ordered coverage</title>\n");
@@ -128,8 +152,25 @@ pub fn generate_ordered(addrs: &[String], lines: &[String], output_path: &str) {
     let _ = w.write_all(b".func{color:#dcdcaa}.file{color:#9cdcfe}.line{color:#b5cea8}");
     let _ = w.write_all(b"</style></head><body>\n");
     let _ = write!(w, "<h2>Ordered Kernel Execution Trace ({} PCs)</h2>\n", addrs.len());
+    if shown < lines.len() {
+        // Say it on the page and on stderr: a truncated view that looks
+        // complete is worse than no view.
+        let _ = write!(
+            w,
+            "<p>Showing the first {shown} of {} entries. The complete \
+             sequence, in order and with every duplicate, is the log this \
+             report was generated from and its srccov twin. Set \
+             VOCK_ORDERED_HTML_ROWS=0 to render all of them.</p>\n",
+            lines.len()
+        );
+        eprintln!(
+            "[vock] {output_path}: rendering the first {shown} of {} trace \
+             entries (VOCK_ORDERED_HTML_ROWS=0 for all)",
+            lines.len()
+        );
+    }
     let _ = w.write_all(b"<table><tr><th>#</th><th>Address</th><th>Function</th><th>Source</th></tr>\n");
-    for (i, loc) in lines.iter().enumerate() {
+    for (i, loc) in lines.iter().take(shown).enumerate() {
         let (func, src) = match loc.split_once(' ') {
             Some((f, s)) => (f, s),
             None => (loc.as_str(), ""),

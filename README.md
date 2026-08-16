@@ -463,7 +463,7 @@ created if missing, this also applies to `vock report`.
 | `srccov.log` | Source-line twin of `kerncov.log`: `0x<pc> <function> <file>:<line>`, same order. `--btf` mode writes it too, at kallsyms granularity: `0x<pc> <function>` per unique PC (no file:line without a vmlinux) |
 | `srccov-local-<TID>.log` | Source-line twin of a per-TID ordered log |
 | `asmcov.log` | Assembly PCs split out of the report: `0x<pc> <function> <file>:<line>: <asm text>` |
-| `coverage-<TID>.html` | Per-thread ordered trace from `--mode kcov --ordered` |
+| `coverage-<TID>.html` | Per-thread ordered trace from `--mode kcov --ordered`. The table renders the first 20000 entries and says so on the page, since one row costs about 700 bytes and a full trace reaches hundreds of MB; the complete sequence is the log itself and its srccov twin. `VOCK_ORDERED_HTML_ROWS=0` renders all of them |
 | `trace.log` | Strace-format syscall log |
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
 

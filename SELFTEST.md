@@ -134,6 +134,17 @@ dedup), the log in
 chronological KCOV-buffer order (not sorted), and the per-TID HTML being
 the ordered execution-trace table.
 
+**Skipped on emulated guests (`--on vng-tcg`).** Sequence mode is the one
+check whose cost tracks coverage volume rather than the workload: every
+task's whole execution is kept, duplicates and all, so `vfs-fork`'s three
+tasks produce about 2M PCs and the report symbolizes each one. Measured on a
+fast host that is 582s under TCG against about 60s under KVM, and CI runners
+are slower still, so on an emulated guest the check only produces timeouts
+that say nothing about sequence semantics. The skip is by emulation, not by
+architecture: a bare-metal arm64 machine with KVM still runs it, and so does
+`--on host`. Capping the report did not help, the symbolization is the cost,
+not the rendering.
+
 Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0, HTML
 report, per-TID ordered report, and keyword filtering. `sud` traces up to the
 target's `execve`, so its `trace.log` is short by design; KCOV coverage is

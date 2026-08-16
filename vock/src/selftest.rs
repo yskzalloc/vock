@@ -438,8 +438,24 @@ impl Harness {
     }
 
     /// Run a command on the target: host → direct; else via vng (default 900s).
+    /// Default guest timeout, scaled to how fast the guest actually runs.
+    ///
+    /// 900s was chosen against KVM guests. A TCG guest emulates every
+    /// instruction and shares its filesystem over 9p, so the same command
+    /// takes an order of magnitude longer: the ordered report alone measured
+    /// 575s under TCG on a fast host, and CI runners are slower still. A
+    /// timeout that fires there is not a test result, it is the harness
+    /// mistaking emulation for failure.
+    fn guest_timeout(&self) -> Duration {
+        if self.run_target == "vng-tcg" {
+            Duration::from_secs(2400)
+        } else {
+            Duration::from_secs(900)
+        }
+    }
+
     fn vng_run(&self, cmd: &[String]) -> Out {
-        self.vng_run_to(cmd, Duration::from_secs(900))
+        self.vng_run_to(cmd, self.guest_timeout())
     }
 
     /// Like `vng_run`, with an explicit timeout (e.g. the 30-min bug hunt).
@@ -561,39 +577,60 @@ impl Harness {
         // the ordered-trace table.
         let fork_tgt = target_cmd(&vb, FORK_TARGET_ARGS);
         let want_tids = FORK_CHILDREN + 1; // children plus the parent task
-        let script = format!(
-            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} {fork_tgt} 2>&1 >/dev/null; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l); L=$(ls -S local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then [ $(wc -l < $L) -gt $(sort -u $L | wc -l) ] && echo ORDERED_DUPS_OK; sort $L | cmp -s - $L || echo ORDERED_SEQ_OK; fi; grep -l 'Ordered Kernel Execution Trace' coverage-*.html >/dev/null 2>&1 && echo ORDERED_HTML_OK"
-        );
-        let r = self.vng_run(&sv(&["bash", "-c", &script]));
-        self.vlog(&r, false);
-        let out = r.stdout_str();
-        if let Some(v) = field(&out, "ORDERED_OK=") {
-            if v.parse::<usize>().unwrap_or(0) >= want_tids {
-                self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html (vfs-fork: {want_tids} tasks)"));
+        // Sequence mode is the one check whose cost is set by coverage
+        // volume rather than by the workload: each task's whole execution is
+        // kept, duplicates and all, so the three tasks here produce about
+        // 2M PCs that the report must symbolize one by one. Measured on a
+        // fast host, that is 582s inside an emulated guest against 60s under
+        // KVM, and CI runners are slower still, so under TCG the check turns
+        // into a timeout that says nothing about sequence semantics. Skip it
+        // there, by emulation rather than by architecture: a bare metal
+        // arm64 machine with KVM still runs it, only the emulated path opts
+        // out. Capping the report (see report/html.rs) did not help; the
+        // symbolization, not the rendering, is the cost.
+        if self.run_target == "vng-tcg" {
+            self.log(
+                "SKIP",
+                "--ordered: emulated guest. The sequence report symbolizes \
+                 every PC of every task (about 2M here) and measured 582s \
+                 under TCG on a fast host, so it only produces timeouts in \
+                 CI. Runs on KVM guests and --on host",
+            );
+        } else {
+            let script = format!(
+                "rm -f kerncov.log coverage-*.html local-*.log remote-*.log && {vb} --mode kcov --ordered --vmlinux {vmlinux} --kernel-src {ks} {fork_tgt} 2>&1 >/dev/null; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_OK=$(ls coverage-*.html | wc -l); L=$(ls -S local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then [ $(wc -l < $L) -gt $(sort -u $L | wc -l) ] && echo ORDERED_DUPS_OK; sort $L | cmp -s - $L || echo ORDERED_SEQ_OK; fi; grep -l 'Ordered Kernel Execution Trace' coverage-*.html >/dev/null 2>&1 && echo ORDERED_HTML_OK"
+            );
+            let r = self.vng_run(&sv(&["bash", "-c", &script]));
+            self.vlog(&r, false);
+            let out = r.stdout_str();
+            if let Some(v) = field(&out, "ORDERED_OK=") {
+                if v.parse::<usize>().unwrap_or(0) >= want_tids {
+                    self.log("PASS", &format!("--ordered: {v} per-TID coverage-<TID>.html (vfs-fork: {want_tids} tasks)"));
+                } else {
+                    self.log("FAIL", &format!("--ordered: {v} per-TID reports, vfs-fork makes {want_tids} tasks"));
+                    self.vlog(&r, true);
+                }
             } else {
-                self.log("FAIL", &format!("--ordered: {v} per-TID reports, vfs-fork makes {want_tids} tasks"));
+                self.log("FAIL", "--ordered: no per-TID report generated");
                 self.vlog(&r, true);
             }
-        } else {
-            self.log("FAIL", "--ordered: no per-TID report generated");
-            self.vlog(&r, true);
-        }
-        if out.contains("ORDERED_DUPS_OK") {
-            self.log("PASS", "--ordered: duplicate PCs preserved (no dedup)");
-        } else {
-            self.log("FAIL", "--ordered: log was deduplicated");
-        }
-        if out.contains("ORDERED_SEQ_OK") {
-            self.log("PASS", "--ordered: log is chronological (not sorted)");
-        } else {
-            self.log("FAIL", "--ordered: log is sorted, not execution order");
-        }
-        if out.contains("ORDERED_HTML_OK") {
-            self.log("PASS", "--ordered: HTML report is the ordered execution trace");
-        } else {
-            self.log("FAIL", "--ordered: HTML report lacks the ordered trace table");
-        }
-        self.sample_largest("srccov-local-", ".log", 3);
+            if out.contains("ORDERED_DUPS_OK") {
+                self.log("PASS", "--ordered: duplicate PCs preserved (no dedup)");
+            } else {
+                self.log("FAIL", "--ordered: log was deduplicated");
+            }
+            if out.contains("ORDERED_SEQ_OK") {
+                self.log("PASS", "--ordered: log is chronological (not sorted)");
+            } else {
+                self.log("FAIL", "--ordered: log is sorted, not execution order");
+            }
+            if out.contains("ORDERED_HTML_OK") {
+                self.log("PASS", "--ordered: HTML report is the ordered execution trace");
+            } else {
+                self.log("FAIL", "--ordered: HTML report lacks the ordered trace table");
+            }
+            self.sample_largest("srccov-local-", ".log", 3);
+        } // end of the non-emulated branch
 
         println!("\n[Test: --mode kcov --filter fs --vmlinux]");
         let script = format!(
@@ -608,6 +645,10 @@ impl Harness {
             self.log("PASS", "--filter fs: report generated");
         } else {
             self.log("FAIL", "--filter fs: no filtered report");
+            // Without this the verdict is unactionable: the markers are
+            // absent for a failed report, a failed guest boot and a killed
+            // run alike, and only the run's own output tells them apart.
+            self.vlog(&r, true);
         }
 
         // Context options shape the processed artifacts: with -C 0 the
@@ -621,6 +662,13 @@ impl Harness {
         let r = self.vng_run(&sv(&["bash", "-c", &script]));
         self.vlog(&r, false);
         let out = r.stdout_str();
+        // All three markers come from one script, so a run that died takes
+        // them out together and would otherwise report as three silent
+        // assertion failures. Show the output once when none arrived.
+        if !out.contains("CTX0_OK") && !out.contains("CTXN_OK") && !out.contains("SRCCOV_DATA_OK=")
+        {
+            self.vlog(&r, true);
+        }
         if out.contains("CTX0_OK") {
             self.log("PASS", "-C 0: processed kerncov.log has no context lines");
         } else {
@@ -806,7 +854,7 @@ impl Harness {
         let script = format!(
             "rm -f kerncov.log srccov.log coverage.html && {vb} --mode hw --ordered --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -s srccov.log ] && echo HW_ORD_PCS=$(wc -l < srccov.log) && {{ [ $(wc -l < srccov.log) -gt $(sort -u srccov.log | wc -l) ] && echo HW_ORD_DUPS_OK; sort srccov.log | cmp -s - srccov.log || echo HW_ORD_SEQ_OK; }}; grep -q 'Ordered Kernel Execution Trace' coverage.html 2>/dev/null && echo HW_ORD_HTML_OK"
         );
-        let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
+        let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), self.guest_timeout());
         self.vlog(&r, false);
         let out = r.stdout_str();
         if out.contains("requires privileges")
@@ -861,7 +909,7 @@ impl Harness {
             let script = format!(
                 "rm -f kerncov.log srccov.log asmcov.log trace.log trace.syz && {perf_pre}{sud_pre}{vb} --mode hw --syzlang --syscall {backend} --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1; echo KCOV_PCS=$(wc -l < srccov.log 2>/dev/null || echo 0) && [ -s trace.log ] && echo TRACE_OK=$(wc -l < trace.log) && grep -q ') = ' trace.log 2>/dev/null && echo FMT_OK && [ -s trace.syz ] && echo SYZ_OK=$(wc -l < trace.syz)"
             );
-            let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), Duration::from_secs(900));
+            let r = self.exec_to(on_host, &sv(&["bash", "-c", &script]), self.guest_timeout());
             self.vlog_full(&r);
             let out = r.stdout_str();
             if out.contains("SUD (SYSCALL_USER_DISPATCH) not supported") {
