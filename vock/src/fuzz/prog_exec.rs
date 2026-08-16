@@ -15,8 +15,8 @@
 //! `PreviousInstructionPC` (`pc-1` on x86_64, `pc-4` on arm64) before being
 //! written. KCOV records the address *after* the call, so the shift is what
 //! makes a PC symbolize to the call site rather than the following line. Every
-//! vock producer — this module, `mode/kcov.rs`, and the `mode/kcov.so` preload
-//! shim — applies it, so all logs share one convention.
+//! vock producer, this module, `mode/kcov.rs`, and the `mode/kcov.so` preload
+//! shim, applies it, so all logs share one convention.
 
 #![allow(dead_code)]
 
@@ -31,7 +31,7 @@ extern "C" fn on_alarm(_sig: libc::c_int) {}
 /// Install a SIGALRM handler *without* `SA_RESTART`, so a blocking syscall is
 /// interrupted with EINTR instead of being restarted. Without this a single
 /// blocking call (`read` on an empty pipe, `accept`, `epoll_wait(-1)`) would
-/// hang the whole replay — the program-level deadline is only checked between
+/// hang the whole replay, the program-level deadline is only checked between
 /// calls.
 pub fn install_watchdog() {
     unsafe {
@@ -92,7 +92,7 @@ pub struct Kcov {
 
 impl Kcov {
     /// Open and enable KCOV for the *calling thread*. Returns `None` when the
-    /// kernel lacks CONFIG_KCOV or debugfs is not mounted — the caller then
+    /// kernel lacks CONFIG_KCOV or debugfs is not mounted, the caller then
     /// runs without coverage rather than failing the program.
     pub fn open() -> Option<Kcov> {
         unsafe {
@@ -172,7 +172,7 @@ struct KcovRemoteArg {
 }
 
 /// Background ("extra") coverage: kernel work done on behalf of this process
-/// by another task — workqueues, softirqs, USB/net completion handlers — which
+/// by another task, workqueues, softirqs, USB/net completion handlers, which
 /// per-task KCOV cannot see. syzkaller reports it separately as `.extra`
 /// because it belongs to no single call.
 pub struct RemoteKcov {

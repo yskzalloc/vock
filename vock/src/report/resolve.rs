@@ -8,13 +8,13 @@ use std::process::{Command, Stdio};
 ///
 /// The addresses are fed in chunks, one addr2line process per chunk:
 /// addr2line caches every DWARF compilation unit it touches and resolving a
-/// whole run against a DWARF5 vmlinux peaks around 1 GiB RSS — inside a small
+/// whole run against a DWARF5 vmlinux peaks around 1 GiB RSS, inside a small
 /// VM the OOM killer takes it mid-run and the tail of the coverage silently
 /// disappears. The input is sorted, so consecutive addresses cluster by CU
 /// and the per-chunk re-parsing costs little.
 const ADDR2LINE_CHUNK: usize = 2048;
 
-/// Resolutions come back as (function, file:line) pairs — `-f` makes
+/// Resolutions come back as (function, file:line) pairs, `-f` makes
 /// addr2line emit the function name on its own line before each location,
 /// so every consumer (report hunks, srccov, asmcov, the ordered table) can
 /// show kernel-patch-style function context.
@@ -45,7 +45,7 @@ fn addr2line_batch(vmlinux: &str, addrs: &[String]) -> Vec<(String, String)> {
     };
     // Feed stdin from a separate thread while the main thread drains stdout:
     // writing everything first deadlocks once addr2line has produced a pipe
-    // buffer's worth of output (~64K) and blocks, no longer reading stdin —
+    // buffer's worth of output (~64K) and blocks, no longer reading stdin,
     // any log beyond a few thousand PCs would hang forever.
     let mut stdin = child.stdin.take();
     let input = addrs.join("\n");

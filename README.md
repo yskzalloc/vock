@@ -9,7 +9,7 @@ sudo ./vock.bin --vmlinux vmlinux /bin/ip addr show
 # → kerncov.log + coverage.html
 ```
 
-vock is written in Rust — a full port of the original C/Python, with no C
+vock is written in Rust, a full port of the original C/Python, with no C
 remaining and `libc` as the only crate dependency. `make` produces `./vock.bin`
 and the `mode/kcov.so` LD_PRELOAD coverage shim.
 
@@ -25,7 +25,7 @@ bundled sample. `selftest 2` (HW trace) is validated on Intel bare metal
 (Core Ultra 7 268V: Intel PT, 18/18 with zero skips as a normal user
 holding the documented privileges, ebpf backend and ordered sequence
 checks included) and on AMD: one run covers a host pass and a KVM-guest pass across all three
-backends — 26/26 checks pass as a normal user with the privileges described
+backends, 26/26 checks pass as a normal user with the privileges described
 under [eBPF Syscall Backend](#ebpf-syscall-backend---syscall-ebpf). The `sud`
 backend traces up to and including the target's `execve` (the LD_PRELOAD
 re-injection that keeps tracing past exec is not yet ported). CoreSight
@@ -51,7 +51,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Optional runtime helpers:
 ```bash
-sudo apt install binutils   # addr2line, nm — source-annotated reports
+sudo apt install binutils   # addr2line, nm, source-annotated reports
 sudo apt install clang      # only to build test kernels in `vock selftest`
 ```
 
@@ -71,7 +71,7 @@ make            # wraps `cargo build --release`; places ./vock.bin and mode/kcov
 
 ### 1. Hardware Mode (Intel PT / AMD LBR)
 
-Works on **any kernel** — no CONFIG_KCOV needed:
+Works on **any kernel**, no CONFIG_KCOV needed:
 
 ```bash
 # Full branch coverage (needs vmlinux for TNT decoding)
@@ -83,7 +83,7 @@ sudo ./vock.bin /bin/ip addr show
 # → kerncov.log
 ```
 
-If not running as root — the kernel only forbids kernel profiling at
+If not running as root, the kernel only forbids kernel profiling at
 `perf_event_paranoid >= 2`, so 1 is enough:
 ```bash
 echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
@@ -99,7 +99,7 @@ sudo ./vock.bin --mode kcov /bin/ip addr show
 # → kerncov.log (local + remote) + coverage.html
 ```
 
-Tracks coverage across `fork()` and `pthread_create()` — each child gets its own KCOV instance (`local-<TID>.log`).
+Tracks coverage across `fork()` and `pthread_create()`, each child gets its own KCOV instance (`local-<TID>.log`).
 
 ### 3. Syscall Tracking
 
@@ -147,7 +147,7 @@ vng --rw -- /path/to/vock --mode kcov --vmlinux vmlinux /bin/ip addr show
 
 `--mode hw` works inside KVM guests, with a caveat: KVM does not virtualize
 AMD branch stacks, so vock falls back to statistical IP sampling and says so
-on stderr. Expect sparse, interrupt-biased coverage in guests — for exact
+on stderr. Expect sparse, interrupt-biased coverage in guests, for exact
 coverage inside a VM use `--mode kcov`; real LBR branch sampling needs bare
 metal. See [Coverage Accuracy](#coverage-accuracy-trace-streams-vs-sampling)
 for the full story and recommended practice. Build a kernel without KCOV to
@@ -166,7 +166,7 @@ Each feature requires specific kernel configs:
 
 ### HW Mode (Intel PT / AMD LBR / CoreSight)
 
-Works on stock distro kernels — only needs:
+Works on stock distro kernels, only needs:
 ```
 CONFIG_PERF_EVENTS=y
 ```
@@ -203,7 +203,7 @@ sudo setcap cap_bpf,cap_perfmon+ep ~/.local/bin/vock # installed
 ```
 
 The backend also reads tracepoint ids from tracefs, which most systems mount
-`700 root:root` — and file capabilities do not bypass path permissions. Note
+`700 root:root`, and file capabilities do not bypass path permissions. Note
 that `mode=` only opens the directories; the `id` files themselves stay
 `0440 root:root`, so the group must be handed over too with `gid=`:
 
@@ -212,11 +212,11 @@ sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing
 ```
 
 So the full normal-user recipe is: the sysctl, the setcap, and the tracefs
-remount — vock names the missing step in its skip message at each stage.
+remount, vock names the missing step in its skip message at each stage.
 Two caveats: `make` / `make install` rewrite the binary, which drops the
 capabilities, so re-apply setcap after every rebuild; and the kernel ignores
 `LD_PRELOAD` for a capability-bearing binary (secure execution), which does
-not matter here — vock sets `LD_PRELOAD` for its *children*, never for
+not matter here, vock sets `LD_PRELOAD` for its *children*, never for
 itself. Inside a vng/virtme VM you are root, so none of this applies.
 
 ### Coverage Report with Source Annotation (`--vmlinux`, `--kernel-src`)
@@ -257,7 +257,7 @@ Hardware tracing tools fall into two fundamentally different classes, and
 knowing which one you are using decides how to read a coverage report.
 
 **Trace streams** record *every* control-flow change into a buffer or trace
-port — the class debuggers like Lauterbach TRACE32 attach to. Coverage from a
+port, the class debuggers like Lauterbach TRACE32 attach to. Coverage from a
 trace stream is complete and deterministic: if the code ran, it is in the
 trace.
 
@@ -275,7 +275,7 @@ makes a 16-entry branch stack behave like a trace port.
 | perf IP sampling | sampling | one instruction pointer per PMI | `perf_event_open(2)` |
 | KCOV | software trace | every covered basic block, per task | `Documentation/dev-tools/kcov.rst` |
 
-AMD x86 has **no trace-stream facility** — BRS (Zen 3) and LbrExtV2 (Zen 4+)
+AMD x86 has **no trace-stream facility**, BRS (Zen 3) and LbrExtV2 (Zen 4+)
 are 16-deep branch stacks read on PMI, so `--mode hw` on AMD is inherently
 statistical. To maximize what one execution yields, vock runs **two
 concurrent events on AMD hosts and merges them**: LBR branch stacks for
@@ -283,27 +283,27 @@ breadth (~32 PCs per sample) plus IBS op for skid-0 precision on a
 hardware-randomized clock that decorrelates from the LBR PMI (measured on
 `ip a`: 85 functions LBR-only, 21 IBS-only, 119 merged in a single run).
 The LBR depth itself is hardware-fixed (CPUID `lbr_v2_stack_sz`, 16 on
-Zen 4/5) — no driver knob deepens it. KCOV is the software equivalent of a
+Zen 4/5), no driver knob deepens it. KCOV is the software equivalent of a
 trace stream: exact and per-task, at the cost of a `CONFIG_KCOV=y` kernel.
 
 ### Intel PT vs. AMD LBR+IBS vs. Arm64 CoreSight ETM
 
-What `--mode hw` actually delivers differs by CPU vendor — the flag is the
+What `--mode hw` actually delivers differs by CPU vendor, the flag is the
 same, the coverage class is not:
 
 | | Intel PT | AMD LBR + IBS (merged) | Arm64 CoreSight ETM |
 |---|---|---|---|
 | Class | trace stream | sampling | trace stream |
 | Completeness | every branch | ~10% of touched PCs per run, hot-path biased | every branch |
-| Can prove code did **not** run | yes (within the trace window) | never — absence means nothing | yes (within the trace window) |
+| Can prove code did **not** run | yes (within the trace window) | never, absence means nothing | yes (within the trace window) |
 | Execution ordering | full ordered path (timestamps available) | 16-branch islands + isolated points, no ordering | full ordered path |
 | Per-record precision | branch-exact | IBS: skid-0 retired ops; LBR: exact branch pairs | branch-exact |
-| Runtime overhead / data | ~2–15%, 100s of MB, AUX bandwidth | near zero, KBs | similar to PT, needs an on-SoC sink (ETB/ETR) |
-| Decode cost | heavy (needs exact code bytes; KASLR/JIT-sensitive) | trivial — PCs come out ready | heavy |
+| Runtime overhead / data | ~2-15%, 100s of MB, AUX bandwidth | near zero, KBs | similar to PT, needs an on-SoC sink (ETB/ETR) |
+| Decode cost | heavy (needs exact code bytes; KASLR/JIT-sensitive) | trivial, PCs come out ready | heavy |
 | Works in KVM guests | no (disabled after CVE-2024-53135) | no (falls back to IP sampling) | no (SoC-level) |
 
 **If you need precise, exhaustive tracking, run vock on an Intel or Arm
-CPU machine** — Intel PT and CoreSight ETM are trace streams, and their
+CPU machine**, Intel PT and CoreSight ETM are trace streams, and their
 reports can be read as "this and only this ran." On AMD, read the report
 as "at least this ran": the merged LBR+IBS samples are individually exact
 but statistically incomplete, so use repeat-and-merge (below) to raise the
@@ -313,7 +313,7 @@ floor, or `--mode kcov` when you control the kernel and need exactness.
 
 - **Intel PT is not exposed to KVM guests** (guest PT support was disabled
   after CVE-2024-53135), and **AMD branch stacks are not virtualized at
-  all** — `perf_event_open` with branch sampling fails with `EOPNOTSUPP`
+  all**, `perf_event_open` with branch sampling fails with `EOPNOTSUPP`
   in the guest. vock then falls back to vPMU IP sampling and prints exactly
   that; selftest 2 marks such passes `[IP-sampling fallback]`.
 - **CoreSight ETM/ETE never exists in an arm64 VM guest.** Even when the
@@ -321,7 +321,7 @@ floor, or `--mode kcov` when you control the kernel and need exactness.
   hypervisor does not describe it in the guest's ACPI tables or grant
   self-hosted trace, so the kernel never registers a `cs_etm` PMU. GitHub's
   arm64 hosted runners are Azure Cobalt VMs, so `vock selftest 2` always
-  SKIPs there — CoreSight validation needs bare-metal arm64 (a dev board or
+  SKIPs there, CoreSight validation needs bare-metal arm64 (a dev board or
   a bare-metal Arm server with firmware that describes the trace unit).
 - The virtual PMU injects PMIs with **skid**: samples cluster at interrupt
   and exception entry (`entry_64.S`, tick, page-fault paths) rather than in
@@ -340,7 +340,7 @@ floor, or `--mode kcov` when you control the kernel and need exactness.
    PT gives trace-stream (TRACE32-grade) completeness.
 3. **On bare-metal AMD, treat `--mode hw` as statistical.** vock already
    merges two concurrent sample streams (LBR + IBS op) per run; for deeper
-   coverage still, run the target several times and merge the logs —
+   coverage still, run the target several times and merge the logs,
    coverage accumulates:
 
    ```bash
@@ -384,9 +384,9 @@ echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 
 | Feature | Intel x86_64 | ARM64 | AMD x86_64 |
 |---------|:---:|:---:|:---:|
-| Intel PT (full branch) | ✓ | — | — |
-| AMD LBR (function-entry) | — | — | ✓ |
-| CoreSight | — | ✓ | — |
+| Intel PT (full branch) | ✓ | - | - |
+| AMD LBR (function-entry) | - | - | ✓ |
+| CoreSight | - | ✓ | - |
 | KCOV | ✓ | ✓ | ✓ |
 | Syscall tracking | ✓ | ✓ | ✓ |
 
@@ -420,7 +420,7 @@ sudo ./vock.bin selftest 2 --on host     # HW trace, auto-selected for the host 
 ./vock.bin selftest --help               # all options
 ```
 
-Test 2 detects the host CPU and runs the matching engine — Intel PT or AMD LBR
+Test 2 detects the host CPU and runs the matching engine, Intel PT or AMD LBR
 on x86_64, CoreSight on arm64. Intel PT and CoreSight need `--on host` (and
 either root or `perf_event_paranoid ≤ 1`); on AMD LBR CPUs one `--on vng-kvm`
 run covers both a host pass and a KVM-guest pass. The host pass's ebpf
@@ -434,12 +434,12 @@ sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing   # tracepoint i
 
 Each missing step SKIPs with the exact command to run; with all three
 granted the full test passes (verified 26/26 on an AMD Ryzen, host ebpf
-included). Re-apply `setcap` after every rebuild — writing the binary drops
+included). Re-apply `setcap` after every rebuild, writing the binary drops
 file capabilities.
 
 All artifacts are written to the working directory by default; pass
 `-d <dir>` (`--output-dir`) to place them in a directory instead, which is
-created if missing — this also applies to `vock report`.
+created if missing, this also applies to `vock report`.
 
 ## Output Files
 
@@ -460,7 +460,7 @@ created if missing — this also applies to `vock report`.
 | `trace.syz` | Syzlang format (for syz-trace2syz) |
 
 All raw coverage logs carry `PreviousInstructionPC`-shifted PCs, syzkaller's
-convention — see [FUZZ.md](FUZZ.md) → *PC convention*. `kerncov.log` stays in
+convention, see [FUZZ.md](FUZZ.md) → *PC convention*. `kerncov.log` stays in
 that raw machine format (its addresses are per-boot KASLR values and it
 remains valid `vock report --log` input); the `srccov`/`asmcov` twins are the
 human-readable transform of the same data, produced by the report's
@@ -472,7 +472,7 @@ through the same pipeline, so `coverage.html`, the terminal excerpts and the
 use kernel-patch conventions: three lines of context before and after each
 covered line (`-A`/`-B` override) and a `... @@ <function>` hunk header, so
 a report reads like a diff. `asmcov.log` appears whenever PCs resolve to
-assembly; under KCOV it is normally absent by nature — KCOV is compiler
+assembly; under KCOV it is normally absent by nature, KCOV is compiler
 instrumentation and `.S` files are not instrumented, so no assembly PC can
 ever be observed by that engine.
 
@@ -491,10 +491,10 @@ vock is a Cargo workspace with two members at the repo root:
 
 `make` builds both and copies the artifacts into place. The binary is
 `./vock.bin`, not `./vock`, because the crate directory at the repo root is
-already named `vock/` — a file of the same name cannot coexist with it.
+already named `vock/`, a file of the same name cannot coexist with it.
 
 The only build dependency is a Rust toolchain; the sole crate dependency is
-`libc`. There is no `build.rs`, no bindgen, and no C to compile — a `CC=...`
+`libc`. There is no `build.rs`, no bindgen, and no C to compile, a `CC=...`
 argument is accepted and ignored for backwards compatibility.
 
 At runtime `vock` finds its shim by checking `$VOCK_KCOV_SO`, then

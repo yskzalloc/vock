@@ -1,4 +1,4 @@
-//! Native BTF parser (port of btf/btf.c) — zero dependencies.
+//! Native BTF parser (port of btf/btf.c), zero dependencies.
 //!
 //! Reads `/sys/kernel/btf/vmlinux` (raw BTF) or an ELF file with a `.BTF`
 //! section directly and builds an in-memory type table indexed by type id

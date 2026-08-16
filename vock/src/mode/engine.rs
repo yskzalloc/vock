@@ -42,7 +42,7 @@ const PERF_RECORD_SAMPLE: u32 = 9;
 const ATTR_DISABLED: u64 = 1 << 0;
 const ATTR_EXCLUDE_USER: u64 = 1 << 4;
 const ATTR_FREQ: u64 = 1 << 10; // sample_period_or_freq is a frequency (Hz)
-// exclude_kernel would be `1 << 5` — kept 0 to trace the kernel.
+// exclude_kernel would be `1 << 5`, kept 0 to trace the kernel.
 
 // Byte offsets into perf_event_mmap_page (stable kernel ABI; the control
 // fields live at fixed offset 1024).
@@ -56,7 +56,7 @@ const AUX_SIZE: usize = 4 * 1024 * 1024; // intel_pt.c: AUX_SIZE (4 MiB)
 const INTEL_MMAP_PAGES: usize = 1; // intel_pt.c: MMAP_PAGES
 const AMD_MMAP_PAGES: usize = 128; // amd_lbr.c: MMAP_PAGES (larger ring)
 
-/// perf_event_attr — matches the kernel ABI (PERF_ATTR_SIZE_VER8, 136 bytes).
+/// perf_event_attr, matches the kernel ABI (PERF_ATTR_SIZE_VER8, 136 bytes).
 /// C bitfields (`disabled`, `exclude_user`, …) are collapsed into `flags`.
 #[repr(C)]
 #[derive(Default)]
@@ -127,7 +127,7 @@ unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t) -> i32 {
     ) as i32
 }
 
-/// Dynamic PMU type from sysfs (e.g. ibs_op), None when the PMU is absent —
+/// Dynamic PMU type from sysfs (e.g. ibs_op), None when the PMU is absent,
 /// notably inside KVM guests, which virtualize neither IBS nor branch stacks.
 fn pmu_type(name: &str) -> Option<u32> {
     let s = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{name}/type")).ok()?;
@@ -825,11 +825,11 @@ impl<'a> PtDecoder<'a> {
                     let ip = self.ip;
                     self.emit_ip(ip);
                 } else {
-                    // Indirect or ret — need a TIP packet.
+                    // Indirect or ret, need a TIP packet.
                     break;
                 }
             } else {
-                // Not a branch — advance.
+                // Not a branch, advance.
                 self.ip = self.ip.wrapping_add(ilen as u64);
             }
         }
@@ -1125,7 +1125,7 @@ fn decode_insn(code: &[u8], max_len: usize) -> (i32, bool, bool, i64) {
             is_cond = false;
             return (len as i32, is_branch, is_cond, branch_rel);
         }
-        // Skip other 0F xx — approximate length via ModRM.
+        // Skip other 0F xx, approximate length via ModRM.
         if len < max_len {
             let modrm = p[len];
             len += 1;

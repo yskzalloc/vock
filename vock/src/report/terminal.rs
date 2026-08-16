@@ -34,7 +34,7 @@ pub fn print_report(
     print!("{}", render(cov, funcs, kernel_src, before, after, filter_kw, true));
 }
 
-/// Plain-text form of the same report — what kerncov.log and asmcov.log
+/// Plain-text form of the same report, what kerncov.log and asmcov.log
 /// carry after processing.
 pub fn render_text(
     cov: &BTreeMap<String, BTreeSet<usize>>,

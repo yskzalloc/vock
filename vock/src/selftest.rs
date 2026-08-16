@@ -1,20 +1,20 @@
-//! `vock selftest` — configure, build and test each mode.
+//! `vock selftest`, configure, build and test each mode.
 //!
 //! Four tests:
-//!   1  Coverage + Syscall + Syzlang (vng)  — exercises every KCOV collection
+//!   1  Coverage + Syscall + Syzlang (vng), exercises every KCOV collection
 //!      and reporting feature: KCOV+vmlinux and KCOV+BTF, across each
 //!      `--syscall` backend, with `--syzlang`, plus the `--ordered` report.
-//!   2  HW trace (host; AMD LBR also vng)    — detects the host CPU and runs
+//!   2  HW trace (host; AMD LBR also vng), detects the host CPU and runs
 //!      the matching engine: Intel PT / AMD LBR (x86_64) or CoreSight (arm64).
 //!      LBR virtualizes on Zen, so `--on vng-kvm` runs it inside the guest.
-//!   3  Filter + xts(aes) Crypto (vng)       — `--filter` narrowed crypto
+//!   3  Filter + xts(aes) Crypto (vng), `--filter` narrowed crypto
 //!      coverage of an xts(aes) decrypt, with plaintext verification.
-//!   4  KASAN bug hunt (vng)                 — builds a KASAN+KCOV kernel and
+//!   4  KASAN bug hunt (vng), builds a KASAN+KCOV kernel and
 //!      loops a sample reproducer, watching dmesg for a KASAN report.
 //!
 //! Shells out to `make` (which builds the Rust workspace), `vng` (virtme-ng)
 //! and the kernel toolchain. `--no-build` skips the `make` step, which is
-//! required whenever cargo is not on PATH — notably under `sudo`, where
+//! required whenever cargo is not on PATH, notably under `sudo`, where
 //! sudoers' `secure_path` drops `~/.cargo/bin`.
 
 mod target;
@@ -51,7 +51,7 @@ fn run(cmd: &[String], cwd: Option<&str>, timeout: Duration) -> Out {
         c.current_dir(d);
     }
     // Put the child in its own process group so that on timeout we can kill the
-    // whole tree (e.g. vng → virtme-run → qemu), not just the direct child —
+    // whole tree (e.g. vng → virtme-run → qemu), not just the direct child,
     // otherwise a timed-out vng leaks an orphaned qemu.
     c.process_group(0);
     c.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -325,7 +325,7 @@ impl Harness {
         self.vlog_n(r, force, 20, 10);
     }
 
-    /// Verbose log with the full command output — used for the HW-trace and
+    /// Verbose log with the full command output, used for the HW-trace and
     /// crypto runs, whose annotated source-excerpt reports (📄 file → covered
     /// lines) are the interesting part and small enough to show whole. Test 1
     /// keeps the compact tail: it runs vock eight times and an unfiltered
@@ -359,7 +359,7 @@ impl Harness {
         }
         println!("  Configuring + building kernel...");
         // Without --force, vng passes --no-update to virtme-configkernel, which
-        // is a no-op whenever a .config already exists — the --configitem list
+        // is a no-op whenever a .config already exists, the --configitem list
         // below would silently never apply (stale config from a previous test
         // or an earlier run wins). --force only forces the config override
         // here; the git-reset branch of vng's --force needs --commit, which we
@@ -398,7 +398,7 @@ impl Harness {
         // 4G: the report step runs addr2line over the DWARF5 vmlinux inside
         // the guest. vng's default 1G guest OOM-kills it mid-resolution and
         // the coverage silently loses files, and a Rust-enabled kernel's
-        // debug info (core/kernel crate CUs) needs headroom beyond 2G — the
+        // debug info (core/kernel crate CUs) needs headroom beyond 2G, the
         // symptom is "??" for the highest addresses, which sort last.
         let mut vng = sv(&["vng", "--rw", "--memory", "4G"]);
         if self.run_target == "vng-tcg" {
@@ -482,7 +482,7 @@ impl Harness {
             self.eval_cov_syscall(&r, &format!("kcov+{backend}+btf"));
         }
 
-        // Group C: the remaining KCOV reporting features — ordered per-TID
+        // Group C: the remaining KCOV reporting features, ordered per-TID
         // report and a keyword-filtered report.
         println!("\n── Group C: KCOV reporting (--ordered, --filter) ──");
         println!("\n[Test: --mode kcov --ordered --vmlinux (sequence semantics)]");
@@ -678,7 +678,7 @@ impl Harness {
         }
         self.log("PASS", &format!("{hw_type} supported ({})", self.arch.cpu));
 
-        // Build a kernel WITHOUT KCOV — HW trace must stand on its own.
+        // Build a kernel WITHOUT KCOV, HW trace must stand on its own.
         let mut configs = vec![
             ("CONFIG_DEBUG_KERNEL", true),
             ("CONFIG_KCOV", false),
@@ -849,7 +849,7 @@ impl Harness {
     // ── Test 3: --filter + xts(aes) crypto decrypt coverage ─────────────────
     //
     // The workload is vock itself (`vock selftest target crypto-*`, AF_ALG in
-    // Rust — see selftest/target.rs), staged in the kernel tree which vng
+    // Rust, see selftest/target.rs), staged in the kernel tree which vng
     // shares with the host, so every check below reads files directly instead
     // of parsing shell markers out of guest stdout.
     fn test_crypto_filter(&mut self) -> bool {
@@ -925,7 +925,7 @@ impl Harness {
             self.log("FAIL", "coverage.html missing");
         }
         // xts(aes) via AF_ALG may complete asynchronously (cryptd / io-wq
-        // worker), off the traced task's syscall path — per-task KCOV then
+        // worker), off the traced task's syscall path, per-task KCOV then
         // legitimately misses the crypto/ source. Bonus, not a hard failure;
         // the decrypt roundtrip below is the real crypto-correctness check.
         let lower = html.to_lowercase();
@@ -1104,7 +1104,7 @@ need rustc, bindgen-cli, rustup component rust-src)",
         true
     }
 
-    // ── Test 4: KASAN bug hunt — run a sample reproducer for ≤30 min ────────
+    // ── Test 4: KASAN bug hunt, run a sample reproducer for ≤30 min ────────
     fn test_fuzz_kasan(&mut self) -> bool {
         println!("\n{}", "=".repeat(60));
         println!("  TEST 4: KASAN bug hunt (sample reproducer on a KCOV kernel, ≤30 min)");
@@ -1247,12 +1247,12 @@ fn field(out: &str, key: &str) -> Option<String> {
 // ─── entry point ────────────────────────────────────────────────────────────
 
 pub fn main(args: &[String]) -> i32 {
-    // `vock selftest target <name>` — the in-VM workload halves (e.g. the
+    // `vock selftest target <name>`, the in-VM workload halves (e.g. the
     // AF_ALG crypto setup/decrypt), not the harness itself.
     if args.first().map(String::as_str) == Some("target") {
         return target::run_target(&args[1..]);
     }
-    // `vock selftest raw <n>` — print the reproducible raw command for test
+    // `vock selftest raw <n>`, print the reproducible raw command for test
     // n, the same text --help shows. CI embeds it in the job summary.
     if args.first().map(String::as_str) == Some("raw") {
         return match args.get(1).and_then(|n| target::raw_command(n)) {
@@ -1317,8 +1317,8 @@ pub fn main(args: &[String]) -> i32 {
         None => format!("{kernel_src}/vmlinux"),
     };
     let vock_dir = crate::util::exe_dir().to_string_lossy().into_owned();
-    // Spawn the same binary that is running this selftest — ./vock.bin in a
-    // build tree, /usr/bin/vock when installed — instead of assuming a
+    // Spawn the same binary that is running this selftest, ./vock.bin in a
+    // build tree, /usr/bin/vock when installed, instead of assuming a
     // build-tree layout. `make` below overwrites the file in place, so a
     // rebuilt binary is what later spawns pick up.
     let vock_bin = std::env::current_exe()

@@ -1,6 +1,6 @@
 //! BTF/kallsyms-based PC resolver (port of report/btf.py).
 //!
-//! Resolves kernel PCs to function names via /proc/kallsyms — no vmlinux or
+//! Resolves kernel PCs to function names via /proc/kallsyms, no vmlinux or
 //! addr2line needed. Optionally renders highlighted source via grep.
 
 use std::io::Write;

@@ -1,4 +1,4 @@
-//! vock — map any userspace program to the exact kernel code it exercises.
+//! vock, map any userspace program to the exact kernel code it exercises.
 //!
 //! CLI orchestrator (port of vock.c `main`). Dispatches to coverage modes
 //! (KCOV / hardware trace), syscall backends (ptrace / SUD / eBPF), the
@@ -36,7 +36,7 @@ enum Coverage {
 }
 
 const HELP: &str = "\
-vock — kernel code coverage and syscall tracker
+vock, kernel code coverage and syscall tracker
 
 usage: vock [OPTIONS] <cmd> [args...]
        vock execprog [FLAGS] <prog.syz>
@@ -85,15 +85,15 @@ examples:
 
 
 const EXECPROG_HELP: &str = "\
-vock execprog — execute a syzkaller program or syscall trace
+vock execprog, execute a syzkaller program or syscall trace
 
 usage: vock execprog [flags] <prog.syz>
 
 Like syzkaller's syz-execprog. Three input forms are auto-detected:
   * syzkaller's &(0x7f...) memory-layout form (an unmodified syzbot
-    reproducer) — deserialised into the 16 MiB data arena, with resource
+    reproducer), deserialised into the 16 MiB data arena, with resource
     copyin/copyout and the fail_nth / async call properties;
-  * vock's inline-hex USB form — driven through the raw-gadget interpreter;
+  * vock's inline-hex USB form, driven through the raw-gadget interpreter;
   * a plain syscall trace with immediate integer arguments.
 
 flags:
@@ -141,7 +141,7 @@ for when syz-manager cannot be used.
 ";
 
 const PROG2C_HELP: &str = "\
-vock prog2c — generate C reproducer from syscall trace
+vock prog2c, generate C reproducer from syscall trace
 
 usage: vock prog2c <trace.syz> [-o output.c]
 
@@ -351,7 +351,7 @@ fn real_main() -> i32 {
                     "--ordered" => o.ordered = true,
                     "--help" | "-h" => {
                         eprintln!(
-                            "vock report — regenerate a coverage report from a log\n\nusage: vock report [--log kerncov.log] [--vmlinux F] [--kernel-src D]\n                   [--btf] [--ordered] [--filter KW] [-A N] [-B N] [-C N] [-d DIR]\n                   [-o coverage.html] [-q]"
+                            "vock report, regenerate a coverage report from a log\n\nusage: vock report [--log kerncov.log] [--vmlinux F] [--kernel-src D]\n                   [--btf] [--ordered] [--filter KW] [-A N] [-B N] [-C N] [-d DIR]\n                   [-o coverage.html] [-q]"
                         );
                         return 0;
                     }

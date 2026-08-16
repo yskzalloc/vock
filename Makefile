@@ -1,9 +1,9 @@
-# vock — Rust build.
+# vock, Rust build.
 #
 # The whole project is Rust. This Makefile is a thin wrapper around cargo so
 # that existing workflows (and `vock selftest`, which shells out to `make`)
 # keep working. The `CC=...` argument passed by some callers is accepted and
-# ignored — there is no C to compile.
+# ignored, there is no C to compile.
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --release
@@ -17,11 +17,11 @@ build:
 	$(CARGO) build $(CARGO_FLAGS)
 
 # Place the artifacts where the runtime expects them:
-#   ./vock.bin        — the main binary (dirname used to locate mode/kcov.so).
+#   ./vock.bin, the main binary (dirname used to locate mode/kcov.so).
 #                       Named `.bin` because the workspace member directory at
 #                       the repo root is itself called `vock/`, so a bare
 #                       `./vock` file would collide with that directory.
-#   ./mode/kcov.so    — the LD_PRELOAD coverage shim
+#   ./mode/kcov.so, the LD_PRELOAD coverage shim
 vock.bin: build
 	cp -f $(TARGET_DIR)/vock ./vock.bin
 

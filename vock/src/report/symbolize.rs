@@ -25,7 +25,7 @@ pub fn srccov_path(log: &Path) -> PathBuf {
 }
 
 /// Write the source-line twin of `log`: one `0x<pc> <file>:<line>` per input
-/// line, order and duplicates preserved. The raw log is left untouched — its
+/// line, order and duplicates preserved. The raw log is left untouched, its
 /// addresses are per-boot (KASLR) values and the machine format other tools
 /// consume; the srccov file is the human-readable view.
 pub fn write_srccov(log: &Path, loc_of: &HashMap<String, String>) {

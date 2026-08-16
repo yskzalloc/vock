@@ -76,7 +76,7 @@ pub fn detect_offset(vmlinux: &str, addrs: &[String]) -> u64 {
         })
         .collect();
 
-    // Try resolving raw addresses first — if they resolve, there's no KASLR.
+    // Try resolving raw addresses first, if they resolve, there's no KASLR.
     let probe_input = norm.iter().take(10).cloned().collect::<Vec<_>>().join("\n");
     let out = addr2line_probe(vmlinux, &probe_input);
     let resolved: Vec<&str> = out.lines().filter(|l| !l.is_empty() && !l.contains("??")).collect();
@@ -88,7 +88,7 @@ pub fn detect_offset(vmlinux: &str, addrs: &[String]) -> u64 {
     // vmlinux _stext. Valid whenever the log was collected on the running
     // kernel, which is vock's normal in-process report flow. The heuristic
     // below cannot be exact: it rounds the sample-to-vmlinux delta to an
-    // alignment, and its addr2line probe cannot reject a wrong guess — any
+    // alignment, and its addr2line probe cannot reject a wrong guess, any
     // address that still lands inside the text range resolves to *some*
     // plausible file, silently attributing coverage to unrelated code.
     if let (Some(run), Some(vml)) = (kallsyms_stext(), vmlinux_sym(vmlinux, "_stext")) {

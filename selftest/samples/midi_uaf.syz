@@ -1,4 +1,4 @@
-# Reproducer — KASAN: slab-use-after-free Write in snd_usb_midi_v2_free
+# Reproducer, KASAN: slab-use-after-free Write in snd_usb_midi_v2_free
 #
 # syzbot bug:   https://syzkaller.appspot.com/bug?extid=565b1138cfbe549d4422
 # subsystem:    sound / USB MIDI 2.0 (UMP)   sound/usb/midi2.c

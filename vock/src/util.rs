@@ -17,8 +17,8 @@ pub fn exe_dir() -> PathBuf {
 /// The same binary has to work from a build tree and from a packaged install,
 /// so the shim is looked up in order:
 ///
-/// 1. `$VOCK_KCOV_SO` — explicit override, for unusual layouts and testing.
-/// 2. `<exe dir>/mode/kcov.so` — the build tree and any relocatable unpack.
+/// 1. `$VOCK_KCOV_SO`, explicit override, for unusual layouts and testing.
+/// 2. `<exe dir>/mode/kcov.so`, the build tree and any relocatable unpack.
 /// 3. The FHS locations a distribution package uses. `/usr/bin/vock` must not
 ///    look for `/usr/bin/mode/kcov.so`.
 ///
@@ -75,7 +75,7 @@ mod tests {
     use super::*;
 
     /// The Debian package installs the shim to /usr/lib/vock/kcov.so, so that
-    /// path must stay in the compiled-in search list — otherwise an installed
+    /// path must stay in the compiled-in search list, otherwise an installed
     /// vock cannot find its own preload shim.
     #[test]
     fn packaged_shim_path_is_searched() {

@@ -5,8 +5,8 @@
 //! (`pkg/image/compression.go`: `zlib.NewWriter` + `base64.StdEncoding`). The
 //! executor decompresses it with `puff_zlib_to_file` (`executor/common_linux.h`).
 //!
-//! This is a from-scratch RFC 1950/1951 decoder following puff's structure —
-//! the same algorithm the executor uses — because vock deliberately carries no
+//! This is a from-scratch RFC 1950/1951 decoder following puff's structure,
+//! the same algorithm the executor uses, because vock deliberately carries no
 //! dependency beyond `libc`.
 
 #![allow(dead_code)]
@@ -350,7 +350,7 @@ mod tests {
     }
 
     /// A real zlib stream produced by a standard compressor (dynamic Huffman
-    /// blocks, back-references) — the shape syzkaller actually emits.
+    /// blocks, back-references), the shape syzkaller actually emits.
     #[test]
     fn decodes_real_zlib_base64_blob() {
         const B64: &str = "eNpjYBgFIxmkVpSY6BaXFqQWJeXkJ2frZhZn6KYkliSOio+Kj4oPfnEGRiZmFlY2dg5OLm4eXj5+AUEhYRFRMXEJSSlpGVk5eQVFJWUVVTV1DU0tbR1dPX0DQyNjE1MzcwtLK2sbWzt7B0cnZxdXN3cPTy9vH18//4DAoOCQ0LDwiMio6JjYuPiExKTklNS09IzMrOyc3Lz8gsKi4pLSsvKKyqrqmtq6+obGpuaW1rb2js6u7p7evv4JEydNnjJ12vQZM2fNnjN33vwFCxctXrJ02fIVK1etXrN23foNGzdt3rJ12/YdO3ft3rN33/4DBw8dPnL02PETJ0+dPnP23PkLFy9dvnL12vUbN2/dvnP33v0HDx89fvL02fMXL1+9fvP23fsPHz99/vL12/cfP3/9/vP33/9R/4/6fyT7HwBIO2vO";

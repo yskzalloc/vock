@@ -1,5 +1,5 @@
 #!/usr/bin/make -f
-# vock — Debian packaging.
+# vock, Debian packaging.
 #
 # The upstream Makefile is a thin cargo wrapper; we drive cargo directly so we
 # can control the target directory and keep the build offline (Debian builds

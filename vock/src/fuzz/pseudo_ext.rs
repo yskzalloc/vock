@@ -112,7 +112,7 @@ fn syz_open_procfs(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     r
 }
 
-/// `syz_open_pts(fd, flags)` — allocate a pty slave for the master `fd`.
+/// `syz_open_pts(fd, flags)`, allocate a pty slave for the master `fd`.
 fn syz_open_pts(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     let master = args[0] as libc::c_int;
     let mut idx: libc::c_int = 0;
@@ -123,7 +123,7 @@ fn syz_open_pts(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     open_path(&format!("/dev/pts/{idx}"), args[1] as libc::c_int)
 }
 
-/// `syz_init_net_socket(domain, type, proto)` — a socket in the init network
+/// `syz_init_net_socket(domain, type, proto)`, a socket in the init network
 /// namespace. Entering that namespace needs privilege; without it we fall back
 /// to a socket in the current namespace, which is what the reproducer would
 /// otherwise have created anyway.
@@ -154,12 +154,12 @@ fn syz_init_net_socket(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32)
     ok(fd)
 }
 
-/// `syz_create_resource(val)` — syzkaller's identity resource constructor.
+/// `syz_create_resource(val)`, syzkaller's identity resource constructor.
 fn syz_create_resource(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     (args[0], 0)
 }
 
-/// `syz_memcpy_off(dst, off, src, src_off, n)` — copy within the arena.
+/// `syz_memcpy_off(dst, off, src, src_off, n)`, copy within the arena.
 fn syz_memcpy_off(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     let dst = args[0].wrapping_add(args[1]);
     let src = args[2].wrapping_add(args[3]);
@@ -178,7 +178,7 @@ fn syz_memcpy_off(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     (0, 0)
 }
 
-/// `syz_genetlink_get_family_id(name, fd)` — resolve a generic netlink family
+/// `syz_genetlink_get_family_id(name, fd)`, resolve a generic netlink family
 /// name to its numeric id via `CTRL_CMD_GETFAMILY`.
 fn syz_genetlink_get_family_id(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     const NETLINK_GENERIC: libc::c_int = 16;
@@ -240,7 +240,7 @@ fn syz_genetlink_get_family_id(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i
     (-1, libc::ENOENT)
 }
 
-/// `syz_io_uring_setup(entries, params, ...)` — create a ring. The submission
+/// `syz_io_uring_setup(entries, params, ...)`, create a ring. The submission
 /// and completion helpers need the mapped rings, which a reproducer normally
 /// obtains through follow-up `mmap` calls in the program itself.
 fn syz_io_uring_setup(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
@@ -260,7 +260,7 @@ fn syz_io_uring_setup(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) 
     }
 }
 
-/// `syz_emit_ethernet(len, packet, ...)` — inject a frame into the tap device
+/// `syz_emit_ethernet(len, packet, ...)`, inject a frame into the tap device
 /// the reproducer's network setup created.
 fn syz_emit_ethernet(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     let len = args[0].max(0) as usize;
@@ -356,7 +356,7 @@ fn detach_loop(lfd: libc::c_int) {
     let _ = std::fs::remove_file(path);
 }
 
-/// `syz_mount_image(fs, dir, flags, opts, chdir, size, img)` —
+/// `syz_mount_image(fs, dir, flags, opts, chdir, size, img)`,
 /// common_linux.h:3523. `img` points at the decompressed image (the parser has
 /// already inflated the `"$<base64>"` blob) and `size` is its length.
 fn syz_mount_image(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
@@ -407,7 +407,7 @@ fn syz_mount_image(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     (0, 0)
 }
 
-/// `syz_read_part_table(size, img)` — force a partition-table re-scan of an
+/// `syz_read_part_table(size, img)`, force a partition-table re-scan of an
 /// image attached to a loop device (common_linux.h).
 fn syz_read_part_table(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     const BLKRRPART: libc::c_ulong = 0x125F;
@@ -446,7 +446,7 @@ pub fn dispatch(call: &Call, args: &[i64; crate::prog_decode::MAX_ARGS], _arena:
     }
 }
 
-/// Names this module can execute — used to report what a program needs.
+/// Names this module can execute, used to report what a program needs.
 pub const SUPPORTED: &[&str] = &[
     "syz_open_dev",
     "syz_open_procfs",

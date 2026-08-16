@@ -6,8 +6,8 @@
 //! vng --rw -- vock --mode kcov --vmlinux ./vmlinux --kernel-src . /bin/ls /tmp
 //! ```
 //!
-//! The Test 3 crypto workload is implemented here in Rust over AF_ALG —
-//! `vock selftest target crypto-setup` / `crypto-decrypt` — instead of a
+//! The Test 3 crypto workload is implemented here in Rust over AF_ALG,
+//! `vock selftest target crypto-setup` / `crypto-decrypt`, instead of a
 //! kcapi-enc shell pipeline. The traced decrypt is a single process making
 //! AF_ALG syscalls, and the staged files live in the working directory (the
 //! kernel tree, which vng shares with the host), so the harness can verify
@@ -37,7 +37,7 @@ pub const SUD_SETUP: &str = "echo 0 > /proc/sys/vm/mmap_min_addr 2>/dev/null; ";
 
 // ─── Test 3 crypto workload (AF_ALG xts(aes)) ───────────────────────────────
 
-/// Staged in the working directory — the kernel tree — so both the guest and
+/// Staged in the working directory, the kernel tree, so both the guest and
 /// the host see them. Prefixed to avoid clobbering anything in a real tree.
 pub const BLOCK_IMG: &str = "vock-block.img";
 pub const BLOCK_ENC: &str = "vock-block.enc";
@@ -65,7 +65,7 @@ const RUST_MISC_DEV_SET_VALUE: libc::c_ulong = 0x4004_7c82;
 
 /// Exercise the Rust misc device end to end, write path first: write()
 /// lands in the sample's write_iter, read() in read_iter, and the three
-/// ioctls in its ioctl handler — all Rust kernel code reached from
+/// ioctls in its ioctl handler, all Rust kernel code reached from
 /// userspace in this single traced task.
 pub fn rust_touch() -> Result<(), String> {
     let path = std::ffi::CString::new(RUST_MISC_DEV).unwrap();
@@ -99,7 +99,7 @@ pub fn rust_touch() -> Result<(), String> {
     }
 }
 
-/// Dispatcher for `vock selftest target <name>` — the in-VM halves of the
+/// Dispatcher for `vock selftest target <name>`, the in-VM halves of the
 /// selftest workloads.
 pub fn run_target(args: &[String]) -> i32 {
     match args.first().map(String::as_str) {
@@ -167,7 +167,7 @@ pub fn crypto_setup(dir: &Path) -> Result<(), String> {
 }
 
 /// The traced target: decrypt `BLOCK_ENC` with the staged key via AF_ALG and
-/// write `BLOCK_DEC`. Single process, no children — every crypto syscall runs
+/// write `BLOCK_DEC`. Single process, no children, every crypto syscall runs
 /// in the task the KCOV shim instruments.
 pub fn crypto_decrypt(dir: &Path) -> Result<(), String> {
     let key = std::fs::read(dir.join(KEY_FILE)).map_err(|e| format!("read {KEY_FILE}: {e}"))?;
@@ -324,7 +324,7 @@ sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing"
             "vock selftest target crypto-setup     # stage {BLOCK_IMG}/{BLOCK_ENC}/{KEY_FILE}\n\
 vng --rw -- vock --mode kcov --filter crypto --vmlinux ./vmlinux --kernel-src . \\\n\
     vock selftest target crypto-decrypt\n\
-# both halves are AF_ALG xts(aes) in vock itself — no kcapi-enc, no shell"
+# both halves are AF_ALG xts(aes) in vock itself, no kcapi-enc, no shell"
         )),
         "4" => Some(format!(
             "vng --rw -- vock execprog -repeat=0 -procs=4 {KASAN_SAMPLE}"
@@ -345,7 +345,7 @@ pub fn help_raw_commands() -> String {
     let mut s = String::from(
         "equivalent raw commands (run from the kernel source tree; each test first\n\
 configures + builds the kernel via `vng --force --configitem ... --build`;\n\
-`vock` is whichever binary you run — ./vock.bin in a build tree works too):\n",
+`vock` is whichever binary you run, ./vock.bin in a build tree works too):\n",
     );
     for t in ["1", "2", "3", "4", "5"] {
         let block = raw_command(t).unwrap_or_default();

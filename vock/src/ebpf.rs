@@ -84,7 +84,7 @@ fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
         | (((imm as u32) as u64) << 32)
 }
 
-/// `BPF_LD_MAP_FD(dst, fd)` — occupies two instruction slots.
+/// `BPF_LD_MAP_FD(dst, fd)`, occupies two instruction slots.
 fn ld_map_fd(prog: &mut Vec<u64>, dst: u8, fd: i32) {
     prog.push(insn(BPF_LD | BPF_DW | BPF_IMM, dst, BPF_PSEUDO_MAP_FD, 0, fd));
     prog.push(0);
@@ -371,7 +371,7 @@ fn not_built() -> i32 {
 
 /// bpf() failed with EPERM: the backend exists but this user may not call
 /// bpf(2). Say exactly why and how to enable it instead of the generic
-/// "not built" — kernel.unprivileged_bpf_disabled=1/2 blocks the very first
+/// "not built", kernel.unprivileged_bpf_disabled=1/2 blocks the very first
 /// map creation for normal users.
 fn eperm_hint() -> i32 {
     let v = std::fs::read_to_string("/proc/sys/kernel/unprivileged_bpf_disabled")
@@ -519,7 +519,7 @@ pub fn run(cmd: &[String], trace_log: &str) -> i32 {
         {
             eprintln!("ebpf backend: tracefs not readable (tracepoint ids live in /sys/kernel/tracing)");
             eprintln!("  as a normal user: sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing");
-            eprintln!("  (the id files are 0440 root:root, so mode= alone is not enough —");
+            eprintln!("  (the id files are 0440 root:root, so mode= alone is not enough;");
             eprintln!("   gid= hands them to your group; or run vock as root)");
             return -1;
         }

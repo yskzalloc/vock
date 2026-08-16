@@ -2,13 +2,13 @@
 
 > **Where fuzzing stands.** `vock execprog` replays programs, and
 > `execprog -stress` mutates and loops them. `vock fuzz` is **not
-> implemented** and prints a notice explaining why — see
+> implemented** and prints a notice explaining why, see
 > [Why not `vock fuzz` yet](#why-not-vock-fuzz-yet).
 
 ## Concept
 
-`vock execprog` executes a syzkaller program — an unmodified syzbot
-reproducer, vock's own inline-hex USB form, or a plain syscall trace — and can
+`vock execprog` executes a syzkaller program, an unmodified syzbot
+reproducer, vock's own inline-hex USB form, or a plain syscall trace, and can
 attribute kernel coverage to each individual call. With `-stress` it treats
 the program as a corpus seed and loops mutating and executing variants of it,
 watching for a kernel report.
@@ -18,9 +18,9 @@ This mirrors syzkaller's own split
 
 | syzkaller | vock | Purpose |
 |---|---|---|
-| `syz-execprog` (default) | `vock execprog` | Replay a program **verbatim** — mutation would stop a reproducer reproducing |
+| `syz-execprog` (default) | `vock execprog` | Replay a program **verbatim**, mutation would stop a reproducer reproducing |
 | `syz-execprog -stress` | `vock execprog -stress` | Local fuzzer for when `syz-manager` cannot be used |
-| `pkg/fuzzer` + `syz-manager` | — | Out of scope |
+| `pkg/fuzzer` + `syz-manager` | - | Out of scope |
 
 ## Usage
 
@@ -46,7 +46,7 @@ Two things are needed before a real fuzzer earns its place:
    `pc ^ hash(prev_pc)` but sits off the execution path. Now that
    `prog_exec.rs` collects per-call KCOV, wiring it in is tractable.
 2. **A choice table.** `prog.Mutate` is driven by syscall-selection priors
-   derived from the descriptions, which vock does not carry — the same gap
+   derived from the descriptions, which vock does not carry, the same gap
    that limits argument-width inference below.
 
 The ported building blocks (`fuzz/mutate.rs`, `signal.rs`, `signal_edge.rs`,
@@ -60,8 +60,8 @@ program from the descriptions and mutating a corpus one; vock has no
 descriptions, so only the mutation half applies and the input program is the
 corpus.
 
-Mutations are deliberately **structure-preserving** — pointers keep pointing at
-their objects and `rN` wiring is untouched — so a variant stays a runnable
+Mutations are deliberately **structure-preserving**, pointers keep pointing at
+their objects and `rN` wiring is untouched, so a variant stays a runnable
 relative of the original rather than noise. What changes: integer leaves
 (interesting values, bit flips, small deltas), buffer contents (bit flips,
 grow, shrink), and the call sequence (drop or duplicate a call, which is how
@@ -124,7 +124,7 @@ runtime_addr = 0x200000000000 + offset          # amd64
 ```
 
 vock maps the 16 MiB arena at `DataOffset` rather than at the textual base,
-because `0x7f…` is exactly where Linux places shared libraries — a `MAP_FIXED`
+because `0x7f…` is exactly where Linux places shared libraries, a `MAP_FIXED`
 there would unmap libc. Objects are laid out immediately before their owning
 call runs (copyin), fixed addresses are reserved first (a 64-byte-granule
 bitmap, as in `prog/alloc.go`) so `AUTO` objects cannot overlap them, and a
@@ -151,7 +151,7 @@ back out of the arena after the call returns. Without the second form every
 
 | Limitation | Effect | Status |
 |---|---|---|
-| No syscall description database (`sys/linux/*.txt`) | The textual form records field *values* but not field *widths*. Integers inside a struct/array default to 8 bytes (`VOCK_PROG_INT_WIDTH` overrides); resource fields use their natural 4 bytes. A write is clipped at the next object's address so an over-wide guess cannot corrupt its neighbour. Byte-exact targets — string literals, which is what most reproducers point at — are unaffected. | Inherent without the DB |
+| No syscall description database (`sys/linux/*.txt`) | The textual form records field *values* but not field *widths*. Integers inside a struct/array default to 8 bytes (`VOCK_PROG_INT_WIDTH` overrides); resource fields use their natural 4 bytes. A write is clipped at the next object's address so an over-wide guess cannot corrupt its neighbour. Byte-exact targets, string literals, which is what most reproducers point at, are unaffected. | Inherent without the DB |
 | Flag/const *names* have no numeric value | An argument written as a symbolic flag decodes to 0 | Inherent without the DB |
 | Bitfield/csum field placement | The `csum_inet` and bitfield-packing primitives are implemented and unit-tested, but which field is a bitfield comes from the descriptions, so only explicit `csum` tokens are honoured | Partial |
 | Pseudo-syscall coverage | 11 in `pseudo_ext.rs` plus the USB raw-gadget set (see below); the rest return **ENOSYS and are listed on startup** rather than silently succeeding | Partial |
@@ -159,13 +159,13 @@ back out of the arena after the call returns. Without the second form every
 Implemented in `pseudo_ext.rs`: `syz_open_dev`, `syz_open_procfs`,
 `syz_open_pts`, `syz_init_net_socket`, `syz_create_resource`,
 `syz_memcpy_off`, `syz_genetlink_get_family_id`, `syz_io_uring_setup`,
-`syz_emit_ethernet`, `syz_mount_image`, `syz_read_part_table` — plus the USB
+`syz_emit_ethernet`, `syz_mount_image`, `syz_read_part_table`, plus the USB
 raw-gadget set (`syz_usb_connect`, `syz_usb_control_io`, `syz_usb_disconnect`)
 in `pseudo_syscalls.rs`.
 
 `syz_mount_image` and `syz_read_part_table` are implemented against upstream's
 current ABI: the filesystem image arrives inline as `"$<base64>"` of a zlib
-stream (`pkg/image/compression.go`), which `inflate.rs` decodes — a
+stream (`pkg/image/compression.go`), which `inflate.rs` decodes, a
 from-scratch RFC 1950/1951 decoder following puff, so vock keeps its
 libc-only dependency. The image is written to a temporary file, attached to a
 free loop device, mounted, and the device is detached afterwards so a
@@ -179,7 +179,7 @@ Still missing: `syz_kvm_setup_cpu`, `syz_fuse_handle_req`, `syz_80211_*`,
 With `-cover`, KCOV is opened **per thread**, reset immediately before each
 call and drained immediately after, so PCs are attributed to individual calls.
 A second, *remote* KCOV handle captures background work done on the process's
-behalf by other tasks (workqueues, softirqs, USB/net completion) — coverage
+behalf by other tasks (workqueues, softirqs, USB/net completion), coverage
 that belongs to no single call.
 
 Output matches `syz-execprog`'s layout (`pkg/instance/execprog.go:388`): one
@@ -194,8 +194,8 @@ written. KCOV records the address *after* the call instruction, so the shift is
 what makes a PC symbolize to the call site rather than to the following source
 line. `pc-1` lands inside the call instruction, which is all `addr2line` needs.
 
-This is applied by every producer — `prog_exec.rs`, `mode/kcov.rs`, and the
-`mode/kcov.so` preload shim — so `kerncov.log`, `local-*.log`,
+This is applied by every producer, `prog_exec.rs`, `mode/kcov.rs`, and the
+`mode/kcov.so` preload shim, so `kerncov.log`, `local-*.log`,
 `remote_coverage.log` and the per-call `kerncov_prog1.*` files are all in the
 same units, and the per-call files are drop-in compatible with syzkaller
 tooling (which undoes the shift with `NextInstructionPC` before symbolizing,

@@ -2,14 +2,14 @@
 //!
 //! Three input forms are handled, in order of precedence:
 //!
-//! 1. **syzkaller's `&(0x7f...)` memory-layout form** — an unmodified syzbot
+//! 1. **syzkaller's `&(0x7f...)` memory-layout form**, an unmodified syzbot
 //!    reproducer. Deserialised by [`crate::prog_decode`] into an argument tree,
 //!    laid out into the data arena, and driven by [`crate::prog_exec`] with
 //!    per-call coverage, resource copyout and the `fail_nth`/`async` call
 //!    properties.
-//! 2. **vock's inline-hex USB form** — routed to the raw-gadget interpreter in
+//! 2. **vock's inline-hex USB form**, routed to the raw-gadget interpreter in
 //!    [`crate::pseudo_syscalls`].
-//! 3. **A plain syscall trace** — immediate integer arguments only; replayed
+//! 3. **A plain syscall trace**, immediate integer arguments only; replayed
 //!    with fork+syscall.
 
 use crate::prog_decode;

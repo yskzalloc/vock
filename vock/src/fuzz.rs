@@ -1,4 +1,4 @@
-//! `vock fuzz` — syz-execprog-style program executor.
+//! `vock fuzz`, syz-execprog-style program executor.
 //!
 //! Current behaviour (execprog only): trace the target program to capture its
 //! syscall sequence, then **execute that program** `repeat` times across
@@ -8,7 +8,7 @@
 //! repeated / in parallel, and collect coverage; a kernel bug surfaces as a
 //! crash/among the console output (as in the syzkaller crash reports).
 //!
-//! Mutation is intentionally NOT performed yet — see the TODO in `run()`. The
+//! Mutation is intentionally NOT performed yet, see the TODO in `run()`. The
 //! ported mutation building blocks (mutate / signal / signal_edge / covset /
 //! btf / types) are retained below for when coverage-guided mutation is
 //! reintroduced.
@@ -86,7 +86,7 @@ fn write_trace(path: &str, trace: &[Syscall]) {
     let _ = std::fs::write(path, s);
 }
 
-/// Trace the target under ptrace and capture its syscall sequence — the
+/// Trace the target under ptrace and capture its syscall sequence, the
 /// program that `syz-execprog` will then replay.
 fn trace_baseline(opts: &Opts) -> Option<Vec<Syscall>> {
     let pid = unsafe { libc::fork() };
@@ -161,7 +161,7 @@ pub fn run(opts: &Opts) -> i32 {
     write_trace("trace.syz", &prog);
     eprintln!("[fuzz] program: {} syscalls → trace.syz", prog.len());
 
-    // Phase 2: execute like syz-execprog — `procs` workers, each replaying the
+    // Phase 2: execute like syz-execprog, `procs` workers, each replaying the
     // program `repeat` times, collecting KCOV coverage into kerncov.log.
     let repeat = opts.iterations;
     let procs = if opts.procs > 0 { opts.procs } else { 1 };

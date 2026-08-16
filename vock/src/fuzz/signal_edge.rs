@@ -12,7 +12,7 @@
 pub const SIGNAL_MAP_BITS: u32 = 16;
 pub const SIGNAL_MAP_SIZE: usize = 1 << SIGNAL_MAP_BITS;
 
-/// Global max signal — union of all edges ever seen.
+/// Global max signal, union of all edges ever seen.
 pub struct EdgeSignal {
     pub map: Vec<u8>, // hit count per edge bucket (SIGNAL_MAP_SIZE)
     pub total_edges: u32,
@@ -27,7 +27,7 @@ impl EdgeSignal {
     }
 }
 
-/// Per-program signal — the sorted set of edges the program contributes.
+/// Per-program signal, the sorted set of edges the program contributes.
 pub struct ProgSignal {
     pub edges: Vec<u32>,
 }

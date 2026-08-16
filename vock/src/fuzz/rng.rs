@@ -3,7 +3,7 @@
 //! The C fuzzer/mutator relies on `rand()` returning a non-negative 31-bit
 //! `int` (POSIX `RAND_MAX == 2147483647`) and seeds workers with
 //! `time ^ getpid() ^ worker_id`. We do not need bit-exact reproduction of
-//! glibc's sequence — only the same range and a good distribution so the
+//! glibc's sequence, only the same range and a good distribution so the
 //! weighted mutation logic behaves identically. A xorshift64 generator
 //! reduced to 31 bits provides that.
 #![allow(dead_code)]

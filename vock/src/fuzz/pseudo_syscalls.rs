@@ -7,10 +7,10 @@
 //! USB-subsystem bugs (USB audio / MIDI, HID, printers, …).
 //!
 //! Only the pieces needed to drive a bug reproducer are ported:
-//!   * `syz_usb_connect(speed, dev)`    — enumerate an emulated device
-//!   * `syz_usb_control_io(fd)`         — service one ep0 control request
-//!   * `syz_usb_disconnect(fd)`         — tear the device down (`close`)
-//!   * `syz_open_dev(path, id, id2)`    — open `/dev/…#…` with `#` → id
+//!   * `syz_usb_connect(speed, dev)`, enumerate an emulated device
+//!   * `syz_usb_control_io(fd)`, service one ep0 control request
+//!   * `syz_usb_disconnect(fd)`, tear the device down (`close`)
+//!   * `syz_open_dev(path, id, id2)`, open `/dev/…#…` with `#` → id
 //!
 //! The response-descriptor arguments of `syz_usb_connect`/`syz_usb_control_io`
 //! (`conn_descs`, `descs`, `resps`) are not modelled: for GET_DESCRIPTOR the
@@ -26,7 +26,7 @@ use std::collections::HashMap;
 
 // ─── Raw Gadget UAPI (linux/usb/raw_gadget.h) ────────────────────────────────
 
-// _IOC encoding (asm-generic/ioctl.h) — same on x86_64 and arm64.
+// _IOC encoding (asm-generic/ioctl.h), same on x86_64 and arm64.
 const IOC_NRBITS: u32 = 8;
 const IOC_TYPEBITS: u32 = 8;
 const IOC_SIZEBITS: u32 = 14;
@@ -311,7 +311,7 @@ pub struct UsbDevice {
     index: DeviceIndex,
 }
 
-/// Enable the endpoints of interface index `n`, disabling the previous one —
+/// Enable the endpoints of interface index `n`, disabling the previous one,
 /// port of `set_interface()`. Failures are non-fatal (as in syzkaller).
 fn set_interface(fd: i32, index: &mut DeviceIndex, n: i32) {
     if index.iface_cur >= 0 && (index.iface_cur as usize) < index.ifaces.len() {
@@ -348,7 +348,7 @@ fn configure_device(fd: i32, index: &mut DeviceIndex) -> i32 {
     0
 }
 
-/// `syz_usb_connect(speed, dev)` — port of `syz_usb_connect_impl` with the
+/// `syz_usb_connect(speed, dev)`, port of `syz_usb_connect_impl` with the
 /// generic OUT-response lookup. `dev` is the full connect blob (device
 /// descriptor + config descriptor + class/endpoint descriptors). `procid`
 /// selects the `dummy_udc.<procid>` instance. Returns the raw-gadget fd, or
@@ -445,7 +445,7 @@ pub fn syz_usb_connect(speed: u8, dev: &[u8], procid: u64) -> Result<UsbDevice, 
     Ok(UsbDevice { fd, index })
 }
 
-/// `syz_usb_control_io(fd)` — service one ep0 control request during the
+/// `syz_usb_control_io(fd)`, service one ep0 control request during the
 /// driver's `probe`. Port of `syz_usb_control_io` with no descriptor/response
 /// tables: IN requests are answered with zeros, SET_INTERFACE switches the
 /// altsetting, other OUT requests are acked. Blocks in EVENT_FETCH until a
@@ -498,7 +498,7 @@ fn lookup_interface(index: &DeviceIndex, num: u8, alt: u8) -> Option<usize> {
         .position(|f| f.b_interface_number == num && f.b_alternate_setting == alt)
 }
 
-/// `syz_usb_disconnect(fd)` — port of `syz_usb_disconnect`: close the fd, which
+/// `syz_usb_disconnect(fd)`, port of `syz_usb_disconnect`: close the fd, which
 /// unbinds the gadget and triggers the driver's `disconnect` (the teardown path
 /// where the UAF lives).
 pub fn syz_usb_disconnect(dev: &UsbDevice) -> i32 {
@@ -507,7 +507,7 @@ pub fn syz_usb_disconnect(dev: &UsbDevice) -> i32 {
     rv
 }
 
-/// `syz_open_dev(path, id, id2)` — port of `syz_open_dev`: substitute the two
+/// `syz_open_dev(path, id, id2)`, port of `syz_open_dev`: substitute the two
 /// `#` placeholders in `path` with `id`/`id2` and `open(O_RDWR)`.
 pub fn syz_open_dev(path: &str, id: u64, id2: u64) -> i32 {
     let mut out = String::with_capacity(path.len() + 8);
@@ -539,8 +539,8 @@ fn sleep_ms(ms: u64) {
 // ─── program interpreter ─────────────────────────────────────────────────────
 //
 // vock serializes a pseudo-syscall reproducer in a simplified, self-describing
-// syzlang-like form (the full syz-executor memory layout — `&(0x7f00…)` pointer
-// args and packed struct literals — is not modelled). One statement per line:
+// syzlang-like form (the full syz-executor memory layout, `&(0x7f00…)` pointer
+// args and packed struct literals, is not modelled). One statement per line:
 //
 //   r0 = syz_usb_connect(0x0, <hex-descriptor-blob>)
 //   syz_usb_control_io(r0)
@@ -623,7 +623,7 @@ fn parse_line(line: &str) -> Option<Op> {
     match name {
         "syz_usb_connect" | "syz_usb_connect$printer" | "syz_usb_connect$hid"
         | "syz_usb_connect$cdc_ecm" | "syz_usb_connect$uac1" | "syz_usb_connect$midi" => {
-            // (speed, dev-blob[, conn_descs])  — conn_descs is ignored.
+            // (speed, dev-blob[, conn_descs]), conn_descs is ignored.
             let speed = parse_u64(args.first()?)? as u8;
             let dev = decode_hex(args.get(1)?)?;
             Some(Op::Connect { res, speed, dev })

@@ -1,7 +1,7 @@
-//! Mutation engine (port of fuzz/mutate.c) — syzkaller rand.go + mutation.go.
+//! Mutation engine (port of fuzz/mutate.c), syzkaller rand.go + mutation.go.
 //!
 //! Strategies: splice from corpus, mutate arg (fd-aware), multi-mutate,
-//! reorder, squash, remove — weighted like syzkaller.
+//! reorder, squash, remove, weighted like syzkaller.
 #![allow(dead_code)]
 
 use super::rng::Rng;
@@ -69,7 +69,7 @@ fn is_fd_arg(nr: i64, ai: usize) -> bool {
 }
 
 fn mutate_arg(val: u64, nr: i64, ai: usize, fds: &FdState, rng: &mut Rng) -> u64 {
-    // Skip userspace pointers — they don't exist in the forked child.
+    // Skip userspace pointers, they don't exist in the forked child.
     if (val >= 0x100000 && val <= 0x7fff_ffff_ffff)
         || (val >= 0x7f00_0000_0000 && val <= 0x7fff_ffff_ffff_ffff)
     {

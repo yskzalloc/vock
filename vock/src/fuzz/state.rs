@@ -1,4 +1,4 @@
-//! Live FD tracking (port of fuzz/state.c) — syzkaller analysis.go state.
+//! Live FD tracking (port of fuzz/state.c), syzkaller analysis.go state.
 #![allow(dead_code)]
 
 use super::rng::Rng;

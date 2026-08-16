@@ -3,8 +3,8 @@
 //! run_hw_mode orchestration in vock.c.
 //!
 //! Public surface (kept stable across the backend port):
-//!   - `available()` — is any hardware-trace PMU usable?
-//!   - `run(...)`     — trace the target and produce kerncov.log + report.
+//!   - `available()`, is any hardware-trace PMU usable?
+//!   - `run(...)`, trace the target and produce kerncov.log + report.
 
 #![allow(clippy::too_many_arguments)]
 

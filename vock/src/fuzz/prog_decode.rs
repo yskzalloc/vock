@@ -19,7 +19,7 @@
 //! ```
 //!
 //! We keep that two-step model rather than mapping the arena at the textual
-//! base, because `0x7f...` is exactly where Linux places shared libraries — a
+//! base, because `0x7f...` is exactly where Linux places shared libraries, a
 //! `MAP_FIXED` there would unmap libc out from under us. `DataOffset` is
 //! chosen by syzkaller to be free.
 //!
@@ -29,11 +29,11 @@
 //!
 //! # Known limitation: integer widths inside compound values
 //!
-//! The textual syntax records field *values* but not field *widths* — those
+//! The textual syntax records field *values* but not field *widths*, those
 //! live in the syscall descriptions (`sys/linux/*.txt`), which vock does not
 //! carry. For a struct/array element we therefore fall back to a fixed width
-//! (8 bytes, override with `VOCK_PROG_INT_WIDTH`). Byte-exact targets — string
-//! literals, which is what most reproducers point at — are unaffected.
+//! (8 bytes, override with `VOCK_PROG_INT_WIDTH`). Byte-exact targets, string
+//! literals, which is what most reproducers point at, are unaffected.
 
 #![allow(dead_code)]
 
@@ -42,7 +42,7 @@ use std::collections::HashMap;
 /// Textual base address used by the serialiser (`encodingAddrBase`).
 pub const ENCODING_ADDR_BASE: u64 = 0x7f00_0000_0000;
 /// Where the data arena actually lives at runtime (`Target.DataOffset`,
-/// sys/targets/targets.go:786 — amd64/arm64 64-bit default).
+/// sys/targets/targets.go:786, amd64/arm64 64-bit default).
 pub const DATA_OFFSET: u64 = 0x2000_0000_0000;
 /// Size of the arena syzkaller reserves (`NumPages * PageSize`, 16 MiB).
 pub const ARENA_SIZE: usize = 16 << 20;
@@ -53,7 +53,7 @@ pub const AUTO_ADDR: u64 = u64::MAX;
 /// Cap on nesting depth so a malformed `{{{{…` line cannot blow the stack.
 const MAX_DEPTH: u32 = 64;
 /// Width of a resource-typed field (`<rN=>`). Nearly every syzkaller resource
-/// is an `fd`, i.e. a C `int`, so a produced field occupies 4 bytes — this is
+/// is an `fd`, i.e. a C `int`, so a produced field occupies 4 bytes, this is
 /// what puts `pipe`'s second fd at offset 4 rather than 8.
 const RES_WIDTH: usize = 4;
 /// Upper bound on a decompressed filesystem image, so a crafted blob cannot
@@ -83,7 +83,7 @@ pub fn physical_addr(offset: u64) -> u64 {
 pub enum Arg {
     /// A plain integer constant.
     Int(u64),
-    /// `rN[/div][+add]` — the value produced by call `N` (resource copyin).
+    /// `rN[/div][+add]`, the value produced by call `N` (resource copyin).
     Res { idx: usize, div: u64, add: u64 },
     /// `&(0xADDR)=inner` or `&(0xADDR/0xSIZE)=nil`. `addr` is arena-relative.
     Ptr { addr: u64, inner: Option<Box<Arg>> },
@@ -93,11 +93,11 @@ pub enum Arg {
     Struct(Vec<Arg>),
     /// `[a, b, c]`
     Array(Vec<Arg>),
-    /// `@name=arg` — a union; only the selected option is serialised.
+    /// `@name=arg`, a union; only the selected option is serialised.
     Union(Box<Arg>),
     /// A `csum[inet]` field, computed over the enclosing buffer at copyin.
     Csum,
-    /// `<rN=>inner` — the field is *produced* by this call: after it returns,
+    /// `<rN=>inner`, the field is *produced* by this call: after it returns,
     /// the bytes at this location fill resource slot `N` (executor.cc's
     /// `copyout_call_results` memory read-back). This is how `pipe` and
     /// `socketpair` hand their fds to later calls.
@@ -126,9 +126,9 @@ pub struct Call {
     pub args: Vec<Arg>,
     /// Index of the resource slot this call's return value fills (`rN =`).
     pub res: Option<usize>,
-    /// `(fail_nth: N)` call property — per-call fault injection.
+    /// `(fail_nth: N)` call property, per-call fault injection.
     pub fail_nth: Option<i32>,
-    /// `(async)` call property — run without waiting for completion.
+    /// `(async)` call property, run without waiting for completion.
     pub is_async: bool,
 }
 
@@ -204,7 +204,7 @@ impl<'a> P<'a> {
                 self.i += 1;
                 break;
             } else if self.i == before {
-                // No progress and no separator — bail rather than spin.
+                // No progress and no separator, bail rather than spin.
                 self.i += 1;
             }
         }
@@ -309,7 +309,7 @@ impl<'a> P<'a> {
         }
         if self.eat(b'=') {
             self.eat_ws();
-            // `&(...)=ANY=[...]` — squashed pointer; parse what follows.
+            // `&(...)=ANY=[...]`, squashed pointer; parse what follows.
             if self.starts_with(b"ANY=") {
                 self.i += 4;
             }
@@ -519,7 +519,7 @@ pub fn parse_call(line: &str) -> Option<Call> {
         line = line[..pos].trim();
     }
     let paren = line.find('(')?;
-    // `rN = call(...)` — the `=` must precede the opening paren.
+    // `rN = call(...)`, the `=` must precede the opening paren.
     let (res, rest) = match line[..paren].find('=') {
         Some(eq) => {
             let lhs = line[..eq].trim();
@@ -725,7 +725,7 @@ impl Arena {
     /// The write is clipped at the next object's address. Because integer
     /// widths are not recoverable from the textual form (see the module
     /// header), an over-wide guess would otherwise blit over the neighbouring
-    /// object — reproducers routinely place objects only 0x20/0x40 apart.
+    /// object, reproducers routinely place objects only 0x20/0x40 apart.
     /// Clipping keeps a bad width guess local to its own object.
     fn write(&self, off: u64, bytes: &[u8]) {
         let mut len = bytes.len();
@@ -770,7 +770,7 @@ impl Drop for Arena {
 // ─── checksums (executor/common.h:452-480) ─────────────────────────────────
 
 /// Internet checksum: sum of little-endian 16-bit words, end-around carry,
-/// one's complement — byte-for-byte syzkaller's `csum_inet_*`.
+/// one's complement, byte-for-byte syzkaller's `csum_inet_*`.
 pub fn csum_inet(data: &[u8]) -> u16 {
     let mut acc: u32 = 0;
     let mut i = 0;
@@ -792,7 +792,7 @@ pub fn csum_inet(data: &[u8]) -> u16 {
     !(acc as u16)
 }
 
-/// Pack `value` into `word` at bits `[offset, offset+length)` — the runtime
+/// Pack `value` into `word` at bits `[offset, offset+length)`, the runtime
 /// half of syzkaller's bitfield encoding (`copyin_int`, executor.cc:1642).
 /// `offset` is counted from the low bit on a little-endian host.
 pub fn bitfield_pack(word: u64, value: u64, offset: u64, length: u64) -> u64 {
@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn write_is_clipped_at_the_next_object() {
         // A struct of five ints guesses 40 bytes, but the next object sits at
-        // offset 0x20 — the write must stop there rather than destroy it.
+        // offset 0x20, the write must stop there rather than destroy it.
         let mut prog = parse_prog(
             "foo(&(0x7f0000000000)={0x1,0x1,0x1,0x1,0x1}, &(0x7f0000000020)=\"abababababababab\")\n",
         );

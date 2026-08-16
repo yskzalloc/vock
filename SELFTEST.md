@@ -8,18 +8,18 @@ kernel toolchain.
 ## Quick Start
 
 ```bash
-# Test 1 — KCOV + syscall engines + reporting (VM)
+# Test 1: KCOV + syscall engines + reporting (VM)
 vock selftest 1 --on vng-kvm --kernel-src ~/stable
 
-# Test 2 — HW trace, auto-selected for the host CPU (bare metal, needs root;
-# on AMD LBR CPUs it also runs fully inside a KVM guest — no root needed)
+# Test 2: HW trace, auto-selected for the host CPU (bare metal, needs root;
+# on AMD LBR CPUs it also runs fully inside a KVM guest, no root needed)
 sudo vock selftest 2 --on host --kernel-src ~/stable
 vock selftest 2 --on vng-kvm --kernel-src ~/stable   # AMD LBR
 
-# Test 3 — --filter + xts(aes) crypto coverage (VM)
+# Test 3: --filter + xts(aes) crypto coverage (VM)
 vock selftest 3 --on vng-kvm --kernel-src ~/stable
 
-# Test 5 — Rust-for-Linux module coverage (VM; skips without a kernel Rust toolchain)
+# Test 5: Rust-for-Linux module coverage (VM; skips without a kernel Rust toolchain)
 vock selftest 5 --on vng-kvm --kernel-src ~/stable
 
 # All four
@@ -109,10 +109,10 @@ Detects the host CPU and builds a kernel **without KCOV**, then runs the engine
 that matches the hardware. On an AMD LBR CPU with `--on vng-kvm` (the
 default), one invocation runs **both** passes:
 
-* **2.1 host** — traces the running host kernel directly (skips cleanly
+* **2.1 host**, traces the running host kernel directly (skips cleanly
   when perf privileges are missing, i.e. `perf_event_paranoid >= 2`
   without root)
-* **2.2 guest** — boots the freshly built kernel in the KVM guest and
+* **2.2 guest**, boots the freshly built kernel in the KVM guest and
   traces there
 
 For the host pass to run the **ebpf** backend as a normal user, `bpf(2)`
@@ -125,7 +125,7 @@ sudo mount -o remount,mode=755,gid=$(id -g) /sys/kernel/tracing  # tracepoint id
 ```
 
 Each missing step SKIPs naming the exact command; with all three granted
-the host pass runs every backend and the whole test passes — verified
+the host pass runs every backend and the whole test passes, verified
 26 passed / 0 failed / 0 skipped on an AMD Ryzen 7 250 as a normal user.
 Re-apply `setcap` after every `make` / `make install` (they rewrite the
 binary and Linux drops file capabilities on write). Root needs none of
@@ -134,7 +134,7 @@ this. The guest passes are unaffected (you are root inside the VM).
 | Host | Engine | Extra config |
 |------|--------|--------------|
 | x86_64 Intel | Intel PT (full branch) | `CONFIG_CPU_SUP_INTEL` |
-| x86_64 AMD | AMD LBR (function-entry) | — |
+| x86_64 AMD | AMD LBR (function-entry) | - |
 | aarch64 | CoreSight | `CONFIG_CORESIGHT` |
 
 ```bash
@@ -144,7 +144,7 @@ echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid    # alternative to root
 
 # AMD LBR virtualizes on Zen, so a KVM guest works too (no root needed;
 # this is what CI runs on AMD runners). Intel PT and CoreSight stay
-# host-only — KVM does not expose them to guests.
+# host-only, KVM does not expose them to guests.
 vock selftest 2 --on vng-kvm --kernel-src ~/stable
 ```
 
@@ -207,7 +207,7 @@ then traces the in-VM **decrypt** with a keyword-filtered report:
 
 The staged files (`vock-block.img/.enc/.dec`, `vock-key.bin`) live in the
 kernel tree, which vng shares with the host, so every check runs host-side on
-the files themselves — no stdout markers. Verifies: coverage PCs > 0,
+the files themselves, no stdout markers. Verifies: coverage PCs > 0,
 `coverage.html` generated, the filtered report contains
 `aes`/`xts`/`crypto`/`skcipher` paths, and the decrypted plaintext matches
 the original.
@@ -227,7 +227,7 @@ the sample's Rust `write_iter`), reads back, and drives its three ioctls.
 
 Asserts, host-side on the artifacts:
 
-* `.rs` source lines appear in `srccov.log` — KCOV instruments Rust kernel
+* `.rs` source lines appear in `srccov.log`, KCOV instruments Rust kernel
   code end to end
 * the **write path** is covered (`write_iter` in the resolved coverage; the
   traced fops are generic wrappers from `rust/kernel/miscdevice.rs`
@@ -238,7 +238,7 @@ Asserts, host-side on the artifacts:
 
 A second pass runs the hw engine against the same device as a bonus
 (SKIP-not-FAIL: statistical sampling, IP fallback in guests). The whole test
-SKIPs cleanly when `make rustavailable` fails — the kernel Rust toolchain
+SKIPs cleanly when `make rustavailable` fails, the kernel Rust toolchain
 needs `rustc`, `bindgen-cli` (`cargo install bindgen-cli`) and the rustup
 `rust-src` component. Coverage buffers are sized for Rust kernels (2M
 entries): a Rust-enabled kernel emits dense coverage and small buffers
@@ -258,13 +258,13 @@ vock execprog -repeat=0 -procs=4 selftest/samples/midi_uaf.syz   # in the VM
 
 The bundled sample targets the syzbot bug
 [`KASAN: slab-use-after-free Write in snd_usb_midi_v2_free`](https://syzkaller.appspot.com/bug?extid=565b1138cfbe549d4422),
-and the test **passes** — the reproducer triggers a real KASAN report.
+and the test **passes**, the reproducer triggers a real KASAN report.
 
 Both reproducer forms run: `execprog` drives syzkaller **pseudo-syscalls**
 (`syz_usb_*`) through the raw-gadget interpreter, and a reproducer written in
 syzkaller's `&(0x7f…)` memory layout goes through the arena deserialiser. A
 program needing a pseudo-syscall vock has not implemented does not fail
-silently — those return `ENOSYS` and are named on startup. See
+silently, those return `ENOSYS` and are named on startup. See
 [FUZZ.md](FUZZ.md) → *Limitations*.
 
 ## Target Programs
@@ -328,7 +328,7 @@ and runs tests 1, 2, 3 and 5 on x86_64 and arm64 runners (the CI installs
 **summary table** (test, verdict, pass/fail/skip counts) to the Actions
 run's Summary tab, uploads every test's full log as its **own artifact**
 linked from that table, and appends the reproducible raw command for each
-test — the same text `vock selftest --help` prints, via
+test, the same text `vock selftest --help` prints, via
 `vock selftest raw <n>`, so the two cannot drift. The summary layout is a
 static template, [`template/ACTION.md`](template/ACTION.md): the last CI
 step substitutes `{{ARCH}}` and replaces the `{{RESULT_ROWS}}` /

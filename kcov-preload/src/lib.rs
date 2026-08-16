@@ -60,7 +60,7 @@ const KCOV_PATH: &[u8] = b"/sys/kernel/debug/kcov\0";
 
 /// Move a freshly opened kcov fd above the range shells hand out. A plain
 /// `open` returns the lowest free fd (3, 4, …), exactly where a target's
-/// `3<file`-style redirection dup2()s to — which would silently replace the
+/// `3<file`-style redirection dup2()s to, which would silently replace the
 /// kcov fd and make the exec hook close the target's own file instead.
 unsafe fn raise_fd(fd: c_int) -> c_int {
     let high = libc::fcntl(fd, libc::F_DUPFD, 700);
@@ -265,7 +265,7 @@ pub unsafe extern "C" fn vfork() -> libc::pid_t {
 // drops the file reference; t->kcov stays set until task exit), while the fds
 // and mappings that could dump or detach it die with the old image. Left
 // alone, the new image's constructor gets -EBUSY from KCOV_ENABLE and the
-// exec'd program collects nothing — a shell target (`/bin/sh script.sh`)
+// exec'd program collects nothing, a shell target (`/bin/sh script.sh`)
 // therefore loses all of its children's coverage. Dump + detach before the
 // real exec; if the exec fails, re-enable and keep collecting.
 

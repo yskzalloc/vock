@@ -18,7 +18,7 @@
 //!
 //! # What is ported here (faithfully) and what is not
 //!
-//! Ported: the *core SUD interception mechanism* from `sud_core.c` —
+//! Ported: the *core SUD interception mechanism* from `sud_core.c`,
 //!   * `enable_sud()`         -> `prctl(PR_SET_SYSCALL_USER_DISPATCH, ON, 0,0,&SELECTOR)`
 //!   * `set_privilege_level()`-> volatile writes to the selector byte
 //!   * `handle_sigsys()`      -> the `SIGSYS`/`SA_SIGINFO` handler that reads
@@ -31,7 +31,7 @@
 //! the richer `name(args...) = <ret>` form (the C SUD path used a cruder
 //! `name(0x..) = ?` printer in `lazypoline.c`). Both contain `) = `.
 //!
-//! NOT ported (deliberately — large and out of scope for a single std+libc file):
+//! NOT ported (deliberately, large and out of scope for a single std+libc file):
 //!   * zpoline binary rewriting (`zpoline.c`, `asm_syscall_hook.S`): rewriting
 //!     `0f 05` syscall bytes to `ff d0` and the zero-page trampoline table. This is
 //!     a pure performance optimization; correctness does not depend on it.
@@ -47,7 +47,7 @@
 //! signal disposition. I verified this empirically: enabling SUD then `execve`ing
 //! `/bin/echo` yields exactly ONE interception (the `execve` itself) and the new
 //! image then runs with zero further SIGSYS traps. This is precisely why the C
-//! backend injects `liblazypoline.so` via `LD_PRELOAD` — so SUD is *re-established
+//! backend injects `liblazypoline.so` via `LD_PRELOAD`, so SUD is *re-established
 //! inside the target* after exec. Without that injected library (which we do not
 //! re-port here), an in-process interceptor cannot follow the target across exec.
 //!
@@ -69,7 +69,7 @@ use crate::syscall::decode::decode_syscall;
 use crate::syscall::Syscall;
 
 // prctl(2) SYSCALL_USER_DISPATCH constants (glibc's libc crate only exposes these
-// under the android module, so we define them locally — the values are stable ABI).
+// under the android module, so we define them locally, the values are stable ABI).
 const PR_SET_SYSCALL_USER_DISPATCH: libc::c_int = 59;
 const PR_SYS_DISPATCH_OFF: libc::c_long = 0;
 const PR_SYS_DISPATCH_ON: libc::c_long = 1;
@@ -169,7 +169,7 @@ mod sud {
     // user-supplied `sa_restorer`, so we install the handler via a raw
     // rt_sigaction (below) pointing here. Crucially, we register this stub as the
     // SUD dispatcher allow-window, so the `rt_sigreturn` it issues is ALWAYS
-    // permitted — even while the selector is BLOCK. Without this, exiting the
+    // permitted, even while the selector is BLOCK. Without this, exiting the
     // handler would itself trap on rt_sigreturn under BLOCK and the kernel would
     // kill us with SIGSYS. This is the pure-SUD analogue of the C
     // `restore_selector_trampoline.S` / virtualize_signals machinery.
@@ -459,7 +459,7 @@ mod sud {
             // execvp path: the execve, and any PATH-search stat/access) is
             // intercepted, logged via decode_syscall, and re-issued. The
             // successful execve then tears SUD down and the target runs untraced
-            // (see module docs — this is the execve limitation the C code sidesteps
+            // (see module docs, this is the execve limitation the C code sidesteps
             // with its injected liblazypoline.so preload, which is not re-ported).
             set_privilege_level(SYSCALL_DISPATCH_FILTER_BLOCK);
             crate::exec::execvp(cmd);
