@@ -316,6 +316,13 @@ floor, or `--mode kcov` when you control the kernel and need exactness.
   all** — `perf_event_open` with branch sampling fails with `EOPNOTSUPP`
   in the guest. vock then falls back to vPMU IP sampling and prints exactly
   that; selftest 2 marks such passes `[IP-sampling fallback]`.
+- **CoreSight ETM/ETE never exists in an arm64 VM guest.** Even when the
+  silicon has a trace unit (Neoverse N2 implements ETE + TRBE), the
+  hypervisor does not describe it in the guest's ACPI tables or grant
+  self-hosted trace, so the kernel never registers a `cs_etm` PMU. GitHub's
+  arm64 hosted runners are Azure Cobalt VMs, so `vock selftest 2` always
+  SKIPs there — CoreSight validation needs bare-metal arm64 (a dev board or
+  a bare-metal Arm server with firmware that describes the trace unit).
 - The virtual PMU injects PMIs with **skid**: samples cluster at interrupt
   and exception entry (`entry_64.S`, tick, page-fault paths) rather than in
   the code that consumed the cycles. A short-lived target contributes only

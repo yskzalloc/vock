@@ -176,6 +176,8 @@ fn detect_arch() -> ArchInfo {
             info.has_intel_pt = true;
         }
     } else if arch == "aarch64" {
+        // Present only when the CoreSight drivers actually bound to a trace
+        // unit (ETMv4 or ARMv9 ETE) described by the firmware.
         if Path::new("/sys/bus/event_source/devices/cs_etm").exists() {
             info.has_coresight = true;
         }
@@ -187,6 +189,20 @@ fn detect_arch() -> ArchInfo {
         }
     }
     info
+}
+
+/// True when running as a VM guest. DMI strings are the portable tell on
+/// both x86 and arm64 servers (arm64 has no CPUID hypervisor bit): Azure
+/// reports "Virtual Machine", QEMU/KVM report "KVM"/"QEMU".
+fn in_vm() -> bool {
+    ["/sys/class/dmi/id/product_name", "/sys/class/dmi/id/sys_vendor"]
+        .iter()
+        .filter_map(|f| std::fs::read_to_string(f).ok())
+        .any(|s| {
+            let s = s.to_lowercase();
+            s.contains("virtual") || s.contains("kvm") || s.contains("qemu")
+                || s.contains("vmware") || s.contains("openstack")
+        })
 }
 
 fn detect_llvm_suffix() -> String {
@@ -627,8 +643,25 @@ impl Harness {
             if self.arch.has_coresight {
                 extra.push(("CONFIG_CORESIGHT", true));
                 "CoreSight"
+            } else if in_vm() {
+                // The silicon may well have a trace unit (Neoverse N2 = 0xd49
+                // implements ETE + TRBE), but hypervisors never describe it in
+                // the guest's ACPI tables or grant self-hosted trace, so the
+                // cs_etm PMU cannot exist in any VM guest. GitHub arm64
+                // runners are Azure Cobalt VMs and always land here.
+                self.log(
+                    "SKIP",
+                    "CoreSight: VM guest, hypervisors do not expose ETM/ETE \
+                     to guests; run on bare-metal arm64",
+                );
+                return true;
             } else {
-                self.log("SKIP", "CoreSight: ETM not available");
+                self.log(
+                    "SKIP",
+                    "CoreSight: no cs_etm PMU; needs CONFIG_CORESIGHT=y \
+                     (+CONFIG_CORESIGHT_TRBE for ARMv9 ETE) and firmware that \
+                     describes the trace unit",
+                );
                 return true;
             }
         } else {
@@ -1453,7 +1486,10 @@ tests:\n\
   2  hw trace            detect the host CPU and run the matching engine:\n\
                          Intel PT / AMD LBR (x86_64) or CoreSight (arm64), no KCOV.\n\
                          AMD LBR also runs under --on vng-kvm (KVM guest);\n\
-                         Intel PT / CoreSight need --on host\n\
+                         Intel PT / CoreSight need --on host, and CoreSight\n\
+                         additionally needs bare-metal arm64: hypervisors do\n\
+                         not expose ETM/ETE to guests, so any arm64 VM\n\
+                         (GitHub arm64 runners are Azure Cobalt VMs) SKIPs\n\
   3  filter + crypto     --filter narrowed xts(aes) decrypt coverage + verify\n\
   4  kasan bug hunt      build a KASAN+KCOV kernel; loop a sample reproducer\n\
                          (MIDI UAF) for <=30 min, watching for a KASAN report\n\

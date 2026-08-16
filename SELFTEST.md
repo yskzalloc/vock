@@ -167,6 +167,32 @@ Skips automatically when:
 - No Intel PT / AMD LBR / CoreSight hardware is detected
 - perf is unavailable (`perf_event_paranoid >= 2` without root, or a nested VM)
 
+On arm64 the CoreSight skip distinguishes the cause: inside any VM guest
+the message says so directly, hypervisors never describe the ETM/ETE
+trace unit in the guest's ACPI tables, so a `cs_etm` PMU cannot exist
+there. This is why GitHub's arm64 hosted runners (Azure Cobalt VMs on
+Neoverse N2, whose silicon does implement ETE + TRBE) always SKIP test 2:
+it is a platform limit, not a missing package. CoreSight validation needs
+bare-metal arm64 with `CONFIG_CORESIGHT=y` (plus `CONFIG_CORESIGHT_TRBE`
+for ARMv9 ETE) and firmware that describes the trace unit.
+
+References:
+
+* [Linux arm64 hosted runners now available for free in public
+  repositories](https://github.blog/changelog/2025-01-16-linux-arm64-hosted-runners-now-available-for-free-in-public-repositories-public-preview/)
+  (GitHub changelog): the arm64 runners are Azure Cobalt 100 VMs
+* [Arm-hosted Runners public beta
+  feedback](https://github.com/orgs/community/discussions/127102)
+  (GitHub community): runner hardware details, Neoverse N2 with SVE2
+* [arm64: coresight: Add support for ETE and
+  TRBE](https://lwn.net/Articles/847445/) (LWN): ETE is the ARMv9
+  successor of ETM, driven by the same `cs_etm` perf PMU; TRBE is its
+  per-CPU trace buffer
+* [kvm/coresight: Support exclude guest and exclude
+  host](https://lkml.iu.edu/hypermail/linux/kernel/2501.0/05073.html)
+  (LKML): the current KVM/CoreSight work filters host-side trace across
+  guest entry/exit; it does not expose the trace unit to guests
+
 ## Test 3: Filter + xts(aes) Crypto (vng)
 
 Builds a KCOV kernel with the crypto subsystem enabled, stages an xts(aes)
