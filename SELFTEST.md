@@ -274,6 +274,29 @@ the original.
 > SKIP-not-FAIL; coverage collection, report generation and `--filter` are
 > asserted.
 
+## Test 4: KASAN bug hunt (vng)
+
+Builds a **KASAN + KCOV** kernel (with the sound / USB-MIDI surface) and loops
+a sample reproducer for up to **30 minutes**, scraping `dmesg` for a KASAN
+report:
+
+```
+vock execprog -repeat=0 -procs=4 selftest/samples/midi_uaf.syz   # in the VM
+→ PASS if a KASAN/use-after-free/BUG report appears
+→ SKIP if none within 30 min (bug not reproduced this run)
+```
+
+The bundled sample targets the syzbot bug
+[`KASAN: slab-use-after-free Write in snd_usb_midi_v2_free`](https://syzkaller.appspot.com/bug?extid=565b1138cfbe549d4422),
+and the test **passes**, the reproducer triggers a real KASAN report.
+
+Both reproducer forms run: `execprog` drives syzkaller **pseudo-syscalls**
+(`syz_usb_*`) through the raw-gadget interpreter, and a reproducer written in
+syzkaller's `&(0x7f…)` memory layout goes through the arena deserialiser. A
+program needing a pseudo-syscall vock has not implemented does not fail
+silently, those return `ENOSYS` and are named on startup. See
+[FUZZ.md](FUZZ.md) → *Limitations*.
+
 ## Test 5: Rust-for-Linux module coverage (vng)
 
 Builds a KCOV kernel with `CONFIG_RUST` and the **built-in**
@@ -299,29 +322,6 @@ needs `rustc`, `bindgen-cli` (`cargo install bindgen-cli`) and the rustup
 `rust-src` component. Coverage buffers are sized for Rust kernels (2M
 entries): a Rust-enabled kernel emits dense coverage and small buffers
 saturate during process startup, silently losing the device ops.
-
-## Test 4: KASAN bug hunt (vng)
-
-Builds a **KASAN + KCOV** kernel (with the sound / USB-MIDI surface) and loops
-a sample reproducer for up to **30 minutes**, scraping `dmesg` for a KASAN
-report:
-
-```
-vock execprog -repeat=0 -procs=4 selftest/samples/midi_uaf.syz   # in the VM
-→ PASS if a KASAN/use-after-free/BUG report appears
-→ SKIP if none within 30 min (bug not reproduced this run)
-```
-
-The bundled sample targets the syzbot bug
-[`KASAN: slab-use-after-free Write in snd_usb_midi_v2_free`](https://syzkaller.appspot.com/bug?extid=565b1138cfbe549d4422),
-and the test **passes**, the reproducer triggers a real KASAN report.
-
-Both reproducer forms run: `execprog` drives syzkaller **pseudo-syscalls**
-(`syz_usb_*`) through the raw-gadget interpreter, and a reproducer written in
-syzkaller's `&(0x7f…)` memory layout goes through the arena deserialiser. A
-program needing a pseudo-syscall vock has not implemented does not fail
-silently, those return `ENOSYS` and are named on startup. See
-[FUZZ.md](FUZZ.md) → *Limitations*.
 
 ## Target Programs
 
