@@ -1,8 +1,7 @@
 //! HTML coverage report generation (port of report/html.py + ordered HTML).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Write;
-use std::path::Path;
 
 fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -14,13 +13,12 @@ fn esc(s: &str) -> String {
 pub fn generate(
     cov: &BTreeMap<String, BTreeSet<usize>>,
     funcs: &BTreeMap<String, BTreeMap<usize, String>>,
-    kernel_src: &str,
     before: i32,
     after: i32,
     output_path: &str,
     filter_kw: Option<&str>,
+    sources: &HashMap<String, String>,
 ) {
-    let src_root = Path::new(kernel_src);
     let before = before.max(0) as usize;
     let after = after.max(0) as usize;
 
@@ -42,10 +40,9 @@ pub fn generate(
             covered.len()
         ));
 
-        let full = src_root.join(fpath);
-        let content = match std::fs::read_to_string(&full) {
-            Ok(c) => c,
-            Err(_) => {
+        let content = match sources.get(fpath) {
+            Some(c) => c,
+            None => {
                 body.push_str("  (file not found)\n</pre>");
                 continue;
             }

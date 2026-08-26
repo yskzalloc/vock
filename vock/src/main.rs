@@ -22,6 +22,7 @@ mod prog_mutate;
 mod pseudo_ext;
 #[path = "fuzz/pseudo_syscalls.rs"]
 mod pseudo_syscalls;
+mod dwarf;
 mod report;
 mod selftest;
 mod sud;
@@ -158,6 +159,7 @@ examples:
 ";
 
 fn main() {
+    report::timing::init();
     std::process::exit(real_main());
 }
 

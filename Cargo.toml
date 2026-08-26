@@ -4,6 +4,11 @@ members = [
     "vock",
     "kcov-preload",
 ]
+# A reference checkout of the addr2line crate may sit here; keep cargo from
+# treating it as a member.
+exclude = [
+    "addr2line",
+]
 
 [workspace.package]
 version = "0.1.0"

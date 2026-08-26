@@ -120,6 +120,15 @@ pub fn run(
         return 1;
     }
 
+    // Open the vmlinux DWARF on a background thread now, so symbolization
+    // has it ready the moment the target exits. In a VM guest the load is
+    // mostly reading the vmlinux over the shared filesystem, which overlaps
+    // fully with the target's run. VOCK_NO_PREWARM=1 disables it.
+    if !btf && std::env::var_os("VOCK_NO_PREWARM").is_none() {
+        report::resolve::prewarm(&report::vmlinux_path(kernel_src, vmlinux));
+    }
+
+    report::timing::mark("kcov: start");
     let remote = unsafe {
         match remote_enable() {
             Some(r) => r,
@@ -145,11 +154,16 @@ pub fn run(
         }
     }
 
+    report::timing::mark("kcov: fork target");
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         // Child: preload the shim and exec the target.
         std::env::set_var("LD_PRELOAD", &preload);
-        if ordered {
+        // The parent reads the per-TID logs itself (ordered: one report
+        // per log; source report: streamed straight from them), so the
+        // shim's own merge into kerncov.log would only be a wasted copy.
+        // --btf still wants the merged raw log as its artifact.
+        if ordered || !btf {
             std::env::set_var("VOCK_NO_MERGE", "1");
         }
         crate::exec::execvp(cmd);
@@ -166,7 +180,9 @@ pub fn run(
             perror("target: waitpid failed");
             return 1;
         }
+        report::timing::mark("kcov: target exited");
         write_remote_log(remote.area);
+        report::timing::mark("kcov: remote log written");
         libc::ioctl(remote.fd, KCOV_DISABLE, 0);
         libc::munmap(
             remote.area as *mut c_void,
@@ -197,6 +213,7 @@ pub fn run(
                     output: out_name.clone(),
                     btf,
                     ordered: true,
+                    parts: Vec::new(),
                 };
                 report::run(&opts);
                 eprintln!("[vock] {name} → {out_name}");
@@ -208,7 +225,16 @@ pub fn run(
         // fini_arrays (dash does), leaving kerncov.log empty or stale. The
         // parent is the one process that reliably outlives every task, so
         // merge here regardless.
-        merge_tid_logs();
+        let parts = if btf {
+            merge_tid_logs();
+            report::timing::mark("kcov: per-TID logs merged");
+            Vec::new()
+        } else {
+            tid_logs()
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect()
+        };
         eprintln!("[vock] generating report");
         let opts = report::Options {
             kernel_src: kernel_src.map(String::from),
@@ -221,6 +247,7 @@ pub fn run(
             output: "coverage.html".to_string(),
             btf,
             ordered: false,
+            parts,
         };
         report::run(&opts);
     }
@@ -232,23 +259,31 @@ pub fn run(
     }
 }
 
-/// Concatenate every per-TID `local-*.log` / `remote-*.log` in the working
-/// directory into `kerncov.log` (same merge the shim performs on teardown).
+/// Every per-TID `local-*.log` / `remote-*.log` in the working directory.
+fn tid_logs() -> Vec<std::path::PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(".") {
+        for ent in rd.flatten() {
+            let name = ent.file_name();
+            let name = name.to_string_lossy();
+            if (name.starts_with("local-") || name.starts_with("remote-")) && name.contains(".log") {
+                v.push(ent.path());
+            }
+        }
+    }
+    v
+}
+
+/// Concatenate every per-TID log into `kerncov.log` (same merge the shim
+/// performs on teardown).
 fn merge_tid_logs() {
     let Ok(merged) = std::fs::File::create("kerncov.log") else {
         return;
     };
     let mut w = std::io::BufWriter::new(merged);
-    if let Ok(rd) = std::fs::read_dir(".") {
-        for ent in rd.flatten() {
-            let name = ent.file_name();
-            let name = name.to_string_lossy();
-            let is_log = (name.starts_with("local-") || name.starts_with("remote-"))
-                && name.contains(".log");
-            if !is_log {
-                continue;
-            }
-            if let Ok(data) = std::fs::read(ent.path()) {
+    {
+        for path in tid_logs() {
+            if let Ok(data) = std::fs::read(&path) {
                 let _ = w.write_all(&data);
                 // A log cut mid-line (a task killed inside its exit writer)
                 // must not glue onto the next file's first PC: one malformed

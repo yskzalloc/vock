@@ -56,7 +56,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Optional runtime helpers:
 ```bash
-sudo apt install binutils   # addr2line, nm, source-annotated reports
+sudo apt install binutils   # addr2line/nm, only as a fallback (VOCK_ADDR2LINE)
 sudo apt install clang      # only to build test kernels in `vock selftest`
 ```
 
@@ -502,13 +502,60 @@ vock is a Cargo workspace with two members at the repo root:
 already named `vock/`, a file of the same name cannot coexist with it.
 
 The only build dependency is a Rust toolchain; the sole crate dependency is
-`libc`. There is no `build.rs`, no bindgen, and no C to compile, a `CC=...`
-argument is accepted and ignored for backwards compatibility.
+`libc` (the DWARF reader the report uses is part of vock). There is no
+`build.rs`, no bindgen, and no C to compile, a `CC=...` argument is accepted
+and ignored for backwards compatibility.
 
 At runtime `vock` finds its shim by checking `$VOCK_KCOV_SO`, then
 `<dir of the binary>/mode/kcov.so` (the build tree), then the packaged
 locations such as `/usr/lib/vock/kcov.so`. So the same binary works from a
 build tree and from an installed package.
+
+The report symbolizes PCs with vock's own DWARF reader (`vock/src/dwarf/`),
+no external program and no DWARF crate: the vmlinux is mmap'd read-only,
+every section is a slice of the mapping, the unit index comes from
+`.debug_aranges` alone (one small read), and a unit's line table and
+function table are parsed only when a PC lands in it. It reads DWARF 2
+through 5 as GCC and clang emit them (`LLVM=1` kernels default to DWARF 5
+and ship no `.debug_aranges`, in which case the index is built from the
+unit headers; `VOCK_DWARF_FULL_INDEX=1` forces that path). The result
+follows `addr2line -f`: the innermost inlined function containing the PC,
+else the enclosing subprogram, else the ELF symbol, plus the line-table
+row. Validated against GNU addr2line: identical on every PC of a GCC
+DWARF 4 kernel (8.4K PCs), and on 97% of 36K sampled PCs of an `LLVM=1`
+DWARF 5 kernel, the rest being PCs where GNU prints an assembler-local
+`.Ltmp` label (vock names the function), PCs with no line row (line 0
+on both sides), and a handful of inline-naming choices where vock
+follows llvm-addr2line. Rust and C++ functions are printed with their
+namespace path.
+
+The load starts on a background thread while the traced program is still
+running (`VOCK_NO_PREWARM=1` disables that). Inside a VM guest every first
+touch of a vmlinux page is a round trip to the host, so the tables a run
+reads scattered pieces of (abbreviations, ranges, strings, symbols) are
+fetched whole in the background and the bodies of the units a batch of
+PCs hits are fetched in parallel before the sequential parse
+(`VOCK_PREFETCH_THREADS`, default 8, 0 disables). Measured on a 1.3 GB
+DWARF 4 vmlinux: the index is ready 80 ms after start, 8.4K unique PCs
+resolve in about 0.3 s from a cold host page cache, against 9 s for GNU
+`addr2line` and 0.6 s for `llvm-addr2line` on the same input.
+`VOCK_ADDR2LINE=<tool>` switches to an external addr2line-compatible tool
+(GNU or LLVM) instead; that is also the fallback when the vmlinux cannot be
+read in-process (compressed debug sections, big-endian).
+
+The report itself is a pipeline, not a batch: a reader thread streams the
+per-TID logs in 4 MB blocks (nothing is merged first), the main thread
+symbolizes each PC the first time it appears, and a writer thread streams
+`srccov.log` out as blocks complete, so log reads, symbolization and the
+largest write all overlap. Only the excerpt views need the complete set;
+those are rendered at the end, the HTML/text artifacts on a worker while
+the terminal report prints file by file.
+
+`VOCK_TIMING=1` prints a wall-clock mark on stderr at every stage of a run
+(target start/exit, DWARF load and prefetch, each symbolized block, each
+artifact, the terminal print) so a slow run shows exactly where the time
+goes; `VOCK_TIMING=<path>` appends them to a file instead, for a VM guest
+whose console drops early output.
 
 ### Debian package
 

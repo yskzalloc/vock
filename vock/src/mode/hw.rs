@@ -91,6 +91,7 @@ pub fn run(
         output: "coverage.html".to_string(),
         btf,
         ordered,
+        parts: Vec::new(),
     };
     report::run(&opts);
 

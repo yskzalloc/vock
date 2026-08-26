@@ -24,58 +24,63 @@ pub fn srccov_path(log: &Path) -> PathBuf {
     PathBuf::from(sym)
 }
 
-/// Write the source-line twin of `log`: one `0x<pc> <file>:<line>` per input
-/// line, order and duplicates preserved. The raw log is left untouched, its
-/// addresses are per-boot (KASLR) values and the machine format other tools
-/// consume; the srccov file is the human-readable view.
-pub fn write_srccov(log: &Path, loc_of: &HashMap<String, String>) {
-    let Ok(data) = std::fs::read_to_string(log) else {
+/// Write the source-line twin of `log`: one `0x<pc> <function> <file>:<line>`
+/// per input PC, order and duplicates preserved. `seq` is the log's PC
+/// sequence as read by the report (so the log is parsed once, not twice);
+/// the raw log is left untouched, its addresses are per-boot (KASLR) values
+/// and the machine format other tools consume; the srccov file is the
+/// human-readable view.
+pub fn write_srccov(log: &Path, seq: &[u64], loc_of: &HashMap<u64, String>) {
+    use std::io::Write;
+    let Ok(f) = std::fs::File::create(srccov_path(log)) else {
         return;
     };
-    let mut out = String::with_capacity(data.len() * 2);
-    for line in data.lines() {
-        let addr = match line.split_whitespace().next() {
-            Some(a) if !a.is_empty() => a,
-            _ => continue,
+    let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+    for &pc in seq {
+        let r = match loc_of.get(&pc) {
+            Some(loc) => writeln!(w, "0x{pc:x} {loc}"),
+            None => writeln!(w, "0x{pc:x} ??"),
         };
-        let key = if addr.starts_with("0x") {
-            addr.to_string()
-        } else {
-            format!("0x{addr}")
-        };
-        match loc_of.get(&key) {
-            Some(loc) => out.push_str(&format!("{key} {loc}\n")),
-            None => out.push_str(&format!("{key} ??\n")),
+        if r.is_err() {
+            return;
         }
     }
-    let _ = std::fs::write(srccov_path(log), out);
+    let _ = w.flush();
 }
 
-/// Build the address → location map from parallel slices of file addresses
-/// and their addr2line resolutions, skipping unresolved (`??`) entries.
+/// The srccov form of one resolution: `<function> <kernel-relative file>:<line>`,
+/// or `None` when the PC did not resolve (`??`).
+pub fn location_string(func: &str, loc: &str, kernel_src: &str) -> Option<String> {
+    if loc.is_empty() || loc.starts_with("??") {
+        return None;
+    }
+    // Same clean kernel-relative path everywhere, KCOV-style.
+    let l = match loc.rfind(':') {
+        Some(colon) => format!(
+            "{}:{}",
+            crate::report::resolve::rel_kernel_path(&loc[..colon], kernel_src),
+            &loc[colon + 1..]
+        ),
+        None => loc.to_string(),
+    };
+    Some(if func.is_empty() || func == "??" {
+        l
+    } else {
+        format!("{func} {l}")
+    })
+}
+
+/// Build the PC → location map from parallel slices of log PCs and their
+/// addr2line resolutions, skipping unresolved (`??`) entries.
 pub fn location_map(
-    file_addrs: &[String],
+    pcs: &[u64],
     resolved: &[(String, String)],
     kernel_src: &str,
-) -> HashMap<String, String> {
-    let mut m = HashMap::with_capacity(file_addrs.len());
-    for (a, (f, l)) in file_addrs.iter().zip(resolved.iter()) {
-        if !l.is_empty() && !l.starts_with("??") {
-            // Same clean kernel-relative path everywhere, KCOV-style.
-            let loc = match l.rfind(':') {
-                Some(colon) => format!(
-                    "{}:{}",
-                    crate::report::resolve::rel_kernel_path(&l[..colon], kernel_src),
-                    &l[colon + 1..]
-                ),
-                None => l.clone(),
-            };
-            let v = if f.is_empty() || f == "??" {
-                loc
-            } else {
-                format!("{f} {loc}")
-            };
-            m.insert(a.clone(), v);
+) -> HashMap<u64, String> {
+    let mut m = HashMap::with_capacity(pcs.len());
+    for (&a, (f, l)) in pcs.iter().zip(resolved.iter()) {
+        if let Some(v) = location_string(f, l, kernel_src) {
+            m.insert(a, v);
         }
     }
     m

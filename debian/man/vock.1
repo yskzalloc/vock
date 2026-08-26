@@ -88,6 +88,25 @@ The generated report.
 .B VOCK_KCOV_SO
 Path to the coverage shim, overriding the built-in search.
 .TP
+.B VOCK_ADDR2LINE
+External addr2line-compatible tool (GNU or LLVM) to symbolize with, instead
+of the built-in in-process DWARF reader. Also used as the fallback when the
+vmlinux cannot be read in-process.
+.TP
+.B VOCK_NO_PREWARM
+Do not load the vmlinux DWARF on a background thread while the target runs.
+.TP
+.B VOCK_DWARF_FULL_INDEX
+Index compilation units from every unit header instead of .debug_aranges
+(automatic when the vmlinux has no .debug_aranges, as with LLVM=1 builds).
+.TP
+.B VOCK_PREFETCH_THREADS
+Threads used to prefetch vmlinux pages before parsing (default 8, 0 disables).
+.TP
+.B VOCK_TIMING
+Print a wall-clock mark on stderr at every stage of a run (\fB1\fP), or
+append the marks to the named file.
+.TP
 .B VOCK_PROG_INT_WIDTH
 Width in bytes assumed for an integer inside a compound argument when
 replaying a syzkaller program. Default 8.
@@ -106,6 +125,7 @@ to be 1 or less, or root.
 .SH SEE ALSO
 .BR perf (1),
 .BR strace (1),
+.BR llvm-addr2line (1),
 .BR addr2line (1)
 .SH AUTHOR
 Yunseong Kim <yunseong.kim@est.tech>
