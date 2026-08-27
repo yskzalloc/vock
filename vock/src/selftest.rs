@@ -11,6 +11,10 @@
 //!      coverage of an xts(aes) decrypt, with plaintext verification.
 //!   4  KASAN bug hunt (vng), builds a KASAN+KCOV kernel and
 //!      loops a sample reproducer, watching dmesg for a KASAN report.
+//!   5  Rust module coverage (vng), KCOV over the built-in rust_misc_device.
+//!   6  kcov-dataflow (vng), builds a CONFIG_KCOV_DATAFLOW kernel with the
+//!      kcov-dataflow clang and checks `--mode dataflow` captures the
+//!      arguments and return values of the vfs-write target's syscalls.
 //!
 //! Shells out to `make` (which builds the Rust workspace), `vng` (virtme-ng)
 //! and the kernel toolchain. `--no-build` skips the `make` step, which is
@@ -24,8 +28,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use target::{
     help_raw_commands, target_cmd, COVERAGE_TARGET_ARGS, CRYPTO_TARGET_ARGS,
-    FORK_CHILDREN, FORK_TARGET_ARGS, KASAN_SAMPLE, KCOV_TARGET_ARGS,
-    RUST_TARGET_ARGS, SUD_SETUP,
+    DATAFLOW_TARGET_ARGS, FORK_CHILDREN, FORK_TARGET_ARGS, KASAN_SAMPLE,
+    KCOV_TARGET_ARGS, RUST_TARGET_ARGS, SUD_SETUP,
 };
 
 // ─── command runner with timeout ────────────────────────────────────────────
@@ -339,7 +343,10 @@ impl Harness {
                 println!("  {t}");
             }
         };
-        for f in ["kerncov.log", "srccov.log", "asmcov.log", "trace.log", "trace.syz"] {
+        for f in [
+            "kerncov.log", "srccov.log", "asmcov.log", "trace.log", "trace.syz",
+            "dataflow.log", "dataflow.txt",
+        ] {
             show("head", f);
         }
         for f in ["coverage.html"] {
@@ -1222,6 +1229,166 @@ need rustc, bindgen-cli, rustup component rust-src)",
         true
     }
 
+    // ── Test 6: kcov-dataflow, arguments and return values ─────────────────
+    fn test_dataflow(&mut self) -> bool {
+        println!("\n{}", "=".repeat(60));
+        println!("  TEST 6: kcov-dataflow (--mode dataflow: arguments + return values)");
+        println!("{}", "=".repeat(60));
+
+        if !Path::new(&self.kernel_src).join("kernel/kcov_dataflow.c").is_file() {
+            self.log(
+                "SKIP",
+                "kernel tree has no kernel/kcov_dataflow.c (the kcov-dataflow series is not applied)",
+            );
+            return true;
+        }
+
+        let configs = vec![
+            ("CONFIG_DEBUG_KERNEL", true),
+            ("CONFIG_KCOV", true),
+            ("CONFIG_KCOV_INSTRUMENT_ALL", true),
+            ("CONFIG_KCOV_DATAFLOW_ARGS", true),
+            ("CONFIG_KCOV_DATAFLOW_RET", true),
+            ("CONFIG_KCOV_DATAFLOW_INSTRUMENT_ALL", true),
+            ("CONFIG_KCOV_DATAFLOW_NO_INLINE", true),
+            ("CONFIG_DEBUG_FS", true),
+            ("CONFIG_DEBUG_INFO", true),
+            ("CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT", false),
+            ("CONFIG_DEBUG_INFO_DWARF5", true),
+            ("CONFIG_DEBUG_INFO_NONE", false),
+            ("CONFIG_DEBUG_INFO_REDUCED", false),
+            ("CONFIG_IKCONFIG", true),
+            ("CONFIG_IKCONFIG_PROC", true),
+        ];
+        if !self.kernel_configure_and_build(&configs) {
+            self.log("FAIL", "kernel configure+build failed (CONFIG_KCOV_DATAFLOW)");
+            return false;
+        }
+        // The options depend on $(cc-option,-fsanitize-coverage=trace-args),
+        // so with a stock clang Kconfig silently drops them: say why rather
+        // than reporting a run that recorded nothing.
+        let cfg = std::fs::read_to_string(Path::new(&self.kernel_src).join(".config"))
+            .unwrap_or_default();
+        if !cfg.contains("CONFIG_KCOV_DATAFLOW_ARGS=y") || !cfg.contains("CONFIG_KCOV_DATAFLOW_RET=y") {
+            self.log(
+                "SKIP",
+                &format!(
+                    "CONFIG_KCOV_DATAFLOW_ARGS/RET did not take: clang{} has no \
+                     -fsanitize-coverage=trace-args/trace-ret (needs the kcov-dataflow LLVM: \
+                     --llvm /path/to/llvm-project/build/bin/)",
+                    self.llvm_suffix
+                ),
+            );
+            return true;
+        }
+        self.log("PASS", "kernel configured + built (KCOV_DATAFLOW_ARGS + RET, instrument all)");
+
+        let vmlinux = self.vmlinux.clone();
+        let ks = self.kernel_src.clone();
+        let vb = self.vock_bin.clone();
+        let ksdir = Path::new(&ks).to_path_buf();
+        let artifacts = [
+            "dataflow.log", "dataflow.txt", "dataflow.html", "kerncov.log", "srccov.log",
+            "coverage.html",
+        ];
+        for f in artifacts {
+            let _ = std::fs::remove_file(ksdir.join(f));
+        }
+
+        println!("\n[Test 6.1: --mode dataflow --vmlinux (vfs-write: arguments + return values)]");
+        // Record from the child's first instrumented instruction until the
+        // buffer fills; under INSTRUMENT_ALL over a 9p share the loader noise
+        // alone is millions of records, so ask for the full 128 MiB buffer so
+        // the workload at the end is never pushed out.
+        let mut cmd = sv(&[
+            "env", "VOCK_DATAFLOW_WORDS=16777216",
+            &vb, "--mode", "dataflow", "--vmlinux", &vmlinux, "--kernel-src", &ks, &vb,
+        ]);
+        cmd.extend(DATAFLOW_TARGET_ARGS.iter().map(|s| s.to_string()));
+        let r = self.vng_run(&cmd);
+        self.vlog_full(&r);
+        if r.code == -1 {
+            self.log("FAIL", "dataflow run: VM run died (boot failure or timeout)");
+            self.vlog(&r, true);
+        }
+        if r.stdout_str().contains("vfs-write: wrote=") {
+            self.log("PASS", "vfs-write target ran under the dataflow session");
+        } else {
+            self.log("FAIL", "vfs-write target did not run (KCOV_DF_ENABLE failed?)");
+        }
+
+        let log = std::fs::read_to_string(ksdir.join("dataflow.log")).unwrap_or_default();
+        let entries = log.lines().filter(|l| l.contains(" ENTRY ")).count();
+        let rets = log.lines().filter(|l| l.contains(" RET ")).count();
+        if entries > 0 && rets > 0 {
+            self.log("PASS", &format!("dataflow.log: {entries} ENTRY + {rets} RET records"));
+        } else {
+            self.log("FAIL", &format!("dataflow.log: {entries} ENTRY + {rets} RET records"));
+        }
+
+        // Value-level checks against what the target does: four write()s
+        // of 4096 bytes (ksys_write(fd, buf, 0x1000) returning 0x1000) and
+        // ftruncate(fd, 2048) (do_sys_ftruncate(fd, 0x800, ...)).
+        let txt = std::fs::read_to_string(ksdir.join("dataflow.txt")).unwrap_or_default();
+        let write_arg = txt.lines().find(|l| l.contains("ksys_write(") && l.contains("0x1000)"));
+        match write_arg {
+            Some(l) => {
+                self.log("PASS", "argument captured: ksys_write(..., 0x1000), the 4096-byte write");
+                println!("      \u{00b7} {}", l.trim().chars().take(100).collect::<String>());
+            }
+            None => self.log("FAIL", "no ksys_write(..., 0x1000) entry in dataflow.txt"),
+        }
+        if txt.lines().any(|l| l.contains("0x1000 = ksys_write(")) {
+            self.log("PASS", "return value captured: 0x1000 = ksys_write(...)");
+        } else {
+            self.log("FAIL", "no `0x1000 = ksys_write(...)` line in dataflow.txt");
+        }
+        match txt.lines().find(|l| l.contains("ftruncate(") && l.contains("0x800")) {
+            Some(l) => {
+                self.log("PASS", "argument captured: ftruncate length 0x800 (2048)");
+                println!("      \u{00b7} {}", l.trim().chars().take(100).collect::<String>());
+            }
+            None => self.log("FAIL", "no ftruncate(..., 0x800, ...) entry in dataflow.txt"),
+        }
+        if txt.lines().any(|l| l.contains('{')) {
+            self.log("PASS", "struct pointer arguments expanded field by field ({...})");
+        } else {
+            self.log("FAIL", "no expanded struct argument in dataflow.txt");
+        }
+        let located = txt.lines().filter(|l| l.contains(".c:")).count();
+        if located > 0 {
+            self.log("PASS", &format!("call tree symbolized via DWARF: {located} lines with file:line"));
+        } else {
+            self.log("FAIL", "no file:line in dataflow.txt (KASLR/vmlinux mismatch?)");
+        }
+        let srccov = std::fs::read_to_string(ksdir.join("srccov.log")).unwrap_or_default();
+        if !srccov.is_empty() && ksdir.join("coverage.html").is_file() {
+            self.log("PASS", &format!("function PCs fed the ordinary report: {} srccov lines + coverage.html", srccov.lines().count()));
+        } else {
+            self.log("FAIL", "srccov.log / coverage.html missing after the dataflow run");
+        }
+        self.sample("dataflow.txt", 8);
+
+        println!("\n[Test 6.2: --mode dataflow --btf (kallsyms, no vmlinux)]");
+        for f in ["dataflow.txt", "dataflow.log"] {
+            let _ = std::fs::remove_file(ksdir.join(f));
+        }
+        let mut cmd = sv(&[
+            "env", "VOCK_DATAFLOW_WORDS=16777216",
+            &vb, "--mode", "dataflow", "--btf", "--kernel-src", &ks, &vb,
+        ]);
+        cmd.extend(DATAFLOW_TARGET_ARGS.iter().map(|s| s.to_string()));
+        let r = self.vng_run(&cmd);
+        self.vlog(&r, false);
+        let txt = std::fs::read_to_string(ksdir.join("dataflow.txt")).unwrap_or_default();
+        if txt.lines().any(|l| l.contains("ksys_write(")) {
+            self.log("PASS", "--btf: functions named through kallsyms without a vmlinux");
+        } else {
+            self.log("FAIL", "--btf: ksys_write not named in dataflow.txt");
+        }
+        true
+    }
+
     // ── Test 4: KASAN bug hunt, run a sample reproducer for ≤30 min ────────
     fn test_fuzz_kasan(&mut self) -> bool {
         println!("\n{}", "=".repeat(60));
@@ -1379,7 +1546,7 @@ pub fn main(args: &[String]) -> i32 {
                 0
             }
             None => {
-                eprintln!("vock selftest raw: expected a test number 1-4");
+                eprintln!("vock selftest raw: expected a test number 1-6");
                 2
             }
         };
@@ -1420,7 +1587,7 @@ pub fn main(args: &[String]) -> i32 {
             "-v" | "--verbose" => verbose = true,
             "--no-build" => no_build = true,
             "--record" => record = true,
-            t @ ("1" | "2" | "3" | "4" | "5") => test = Some(t.to_string()),
+            t @ ("1" | "2" | "3" | "4" | "5" | "6") => test = Some(t.to_string()),
             other => {
                 eprintln!("vock selftest: unrecognized argument '{other}'");
                 print_help();
@@ -1574,12 +1741,16 @@ pub fn main(args: &[String]) -> i32 {
         Some("5") => {
             h.test_rust_module();
         }
+        Some("6") => {
+            h.test_dataflow();
+        }
         _ => {
             h.test_coverage();
             h.test_hw();
             h.test_crypto_filter();
             h.test_fuzz_kasan();
             h.test_rust_module();
+            h.test_dataflow();
         }
     }
 
@@ -1655,7 +1826,7 @@ fn record_casts(
     }
     let tests: Vec<&str> = match test {
         Some(t) => vec![t],
-        None => vec!["1", "2", "3", "4", "5"],
+        None => vec!["1", "2", "3", "4", "5", "6"],
     };
     let mut worst = 0;
     for t in &tests {
@@ -1696,7 +1867,7 @@ fn print_help() {
     eprint!(
         "usage: vock selftest [-h] [--on {{host,vng-kvm,vng-tcg}}] [--kernel-src PATH]\n\
                      [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [--record]\n\
-                     [-v] [1-5]\n\n\
+                     [-v] [1-6]\n\n\
 tests:\n\
   1  coverage + syscall  build a KCOV kernel; exercise every KCOV collection and\n\
                          reporting feature: KCOV+vmlinux and KCOV+BTF across each\n\
@@ -1713,7 +1884,11 @@ tests:\n\
                          (MIDI UAF) for <=30 min, watching for a KASAN report\n\
   5  rust module         build a KCOV kernel with CONFIG_RUST and the built-in\n\
                          rust_misc_device sample; write() into it from userspace\n\
-                         and assert .rs source lines appear in the coverage\n\n\
+                         and assert .rs source lines appear in the coverage\n\
+  6  dataflow           build a CONFIG_KCOV_DATAFLOW kernel (needs the kcov-dataflow\n\
+                         clang via --llvm /path/to/llvm-project/build/bin/, SKIPs\n\
+                         otherwise); run vfs-write under --mode dataflow and assert\n\
+                         its syscall arguments and return values were captured\n\n\
 options:\n\
   --no-build  do not re-run make; use the existing ./vock.bin. Needed when\n\
               cargo is not on PATH, e.g. under sudo (secure_path).\n\

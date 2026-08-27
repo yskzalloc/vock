@@ -4,7 +4,7 @@
 //! annotated via addr2line) plus a terminal summary. Also implements `--btf`
 //! (resolve via /proc/kallsyms, no vmlinux) and `--ordered` execution traces.
 
-mod btf;
+pub(crate) mod btf;
 mod dwarf;
 pub(crate) mod timing;
 pub(crate) mod symbolize;

@@ -13,13 +13,25 @@ vock is written in Rust, a full port of the original C/Python, with no C
 remaining and `libc` as the only crate dependency. `make` produces `./vock.bin`
 and the `mode/kcov.so` LD_PRELOAD coverage shim.
 
+Beyond *which* kernel code a program reaches, `--mode dataflow` records
+*with what*: every instrumented function's arguments and return value, in
+order, struct pointers expanded field by field. It needs a kernel built
+with the kcov-dataflow passes (`CONFIG_KCOV_DATAFLOW_ARGS`/`_RET`); see
+[DATAFLOW.md](DATAFLOW.md).
+
 **Status.** All selftests pass on x86_64, including Rust-for-Linux
 coverage: selftest 5 traces a userspace write() into the built-in
 `rust_misc_device` sample and verifies `.rs` source lines (the sample's
 `write_iter` included) in the resolved coverage, with Rust symbols reported
 in both v0-mangled and demangled form. `selftest 1` (KCOV) covers
 KCOV+vmlinux and KCOV+BTF across all three syscall backends (`ptrace`, `sud`,
-`ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 3`
+`ebpf`), with `--syzlang`, `--ordered` and `--filter` reporting. `selftest 6`
+covers `--mode dataflow`: it builds a `CONFIG_KCOV_DATAFLOW` kernel with the
+kcov-dataflow clang and checks that the `vfs-write` target's syscall
+arguments and return values (`ksys_write(…, 0x1000)` and its `0x1000`
+return, `ftruncate(…, 0x800)`, expanded struct pointers) come back through
+the buffer; it SKIPs when the clang lacks the trace-args/trace-ret passes.
+`selftest 3`
 (crypto) passes; `selftest 4` reproduces a real KASAN use-after-free from the
 bundled sample. `selftest 2` (HW trace) is validated on Intel bare metal
 (Core Ultra 7 268V: Intel PT, 18/18 with zero skips as a normal user
@@ -109,6 +121,26 @@ own KCOV instance (`local-<TID>.log`). A task's log is written when the task
 ends, including when it ends through `_exit()` rather than `exit()`, which is
 how a forked child normally ends and how dash ends.
 
+### 2b. Dataflow Mode
+
+Arguments and return values of every instrumented kernel function, in order
+(needs `CONFIG_KCOV_DATAFLOW_ARGS`/`_RET`, i.e. a kernel built with the
+kcov-dataflow clang):
+
+```bash
+sudo ./vock.bin --mode dataflow --vmlinux vmlinux --kernel-src . /bin/ls /tmp
+# → dataflow.txt (call tree with values), dataflow.log, dataflow.html
+#   + kerncov.log / srccov.log / coverage.html (line coverage, as usual)
+```
+
+`dataflow.txt` reads as a call tree, e.g. `ksys_write(0x3, 0x0, 0x1000)` then
+`0x1000 = ksys_write()`; `{…}` is an expanded struct pointer, `FAULT` a field
+the callee received as NULL/ERR_PTR. `--remote-handle H` also captures a
+kworker that brackets its work with `kcov_df_remote_start(H)`. The kernel
+buffer is linear (not a ring), so a target that fills it drops its own later
+records; raise `VOCK_DATAFLOW_WORDS` (default 8M words = 64 MiB, cap 128 MiB).
+See [DATAFLOW.md](DATAFLOW.md) for the record format and the full story.
+
 ### 3. Syscall Tracking
 
 ```bash
@@ -186,6 +218,20 @@ CONFIG_KCOV=y
 CONFIG_KCOV_INSTRUMENT_ALL=y
 ```
 
+### Dataflow Mode
+
+Built with the kcov-dataflow clang (the trace-args/trace-ret passes; a stock
+clang makes Kconfig drop these silently):
+
+```
+CONFIG_KCOV=y
+CONFIG_KCOV_DATAFLOW_ARGS=y
+CONFIG_KCOV_DATAFLOW_RET=y
+CONFIG_KCOV_DATAFLOW_INSTRUMENT_ALL=y
+CONFIG_DEBUG_INFO=y
+CONFIG_DEBUG_INFO_DWARF5=y
+```
+
 ### eBPF Syscall Backend (`--syscall ebpf`)
 
 ```
@@ -258,6 +304,7 @@ CONFIG_CRYPTO_USER_API_SKCIPHER=y
 | AMD LBR + IBS | `--mode hw` (auto) | Branch + precise-op samples, timestamp-merged (bare metal); IP samples in VMs. `--ordered` renders the sequence | `CONFIG_PERF_EVENTS=y` |
 | CoreSight | `--mode hw` (auto) | Function-entry | `CONFIG_PERF_EVENTS=y`, `CONFIG_CORESIGHT=y` |
 | KCOV | `--mode kcov` | Branch (per-task + remote) | `CONFIG_KCOV=y`, `CONFIG_KCOV_INSTRUMENT_ALL=y` |
+| Dataflow | `--mode dataflow` | Function arguments + return values (per-task, ordered) | `CONFIG_KCOV_DATAFLOW_ARGS=y`, `CONFIG_KCOV_DATAFLOW_RET=y` (kcov-dataflow clang) |
 
 ## Coverage Accuracy: Trace Streams vs. Sampling
 
@@ -396,6 +443,7 @@ echo 0 | sudo tee /proc/sys/vm/mmap_min_addr
 | AMD LBR (function-entry) | - | - | ✓ |
 | CoreSight | - | ✓ | - |
 | KCOV | ✓ | ✓ | ✓ |
+| KCOV dataflow | ✓ | - | ✓ |
 | Syscall tracking | ✓ | ✓ | ✓ |
 
 ## Workflow: Coverage to Syzkaller
@@ -416,7 +464,7 @@ syz-trace2syz -file trace.syz
 
 ## Selftest
 
-Five tests (see [SELFTEST.md](SELFTEST.md) for details):
+Six tests (see [SELFTEST.md](SELFTEST.md) for details):
 
 ```bash
 ./vock.bin selftest 1 --on vng-kvm       # KCOV + all syscall engines + reporting (VM)
@@ -424,7 +472,8 @@ sudo ./vock.bin selftest 2 --on host     # HW trace, auto-selected for the host 
 ./vock.bin selftest 3 --on vng-kvm       # --filter + xts(aes) crypto coverage (VM)
 ./vock.bin selftest 4 --on vng-kvm       # KASAN bug hunt: loop a sample repro ≤30 min
 ./vock.bin selftest 5 --on vng-kvm       # Rust-for-Linux module coverage (KCOV + write path)
-./vock.bin selftest      --on vng-kvm    # all five
+./vock.bin selftest 6 --on vng-kvm --llvm /path/to/llvm-project/build/bin/  # kcov-dataflow args + return values
+./vock.bin selftest      --on vng-kvm    # all six
 ./vock.bin selftest --help               # all options
 ```
 
@@ -460,6 +509,10 @@ created if missing, this also applies to `vock report`.
 | `kerncov_prog1.<N>` | Per-call coverage from `execprog -cover` |
 | `kerncov_prog1.extra` | Background coverage belonging to no single call |
 | `coverage.html` | Source-annotated coverage report (C source only) |
+| `dataflow.txt` | `--mode dataflow` call tree: `<file:line> [<ret> = ]<func>(<args>)`, `{…}` an expanded struct pointer, `FAULT` an unreadable field |
+| `dataflow.log` | `--mode dataflow` records, one per line (`ENTRY`/`RET`/`CMP`), machine format; valid `vock report --log` input |
+| `dataflow.html` | `dataflow.txt` as a page |
+| `dataflow-remote.log` | `--mode dataflow --remote-handle H` kworker records |
 | `srccov.log` | Source-line twin of `kerncov.log`: `0x<pc> <function> <file>:<line>`, same order. `--btf` mode writes it too, at kallsyms granularity: `0x<pc> <function>` per unique PC (no file:line without a vmlinux) |
 | `srccov-local-<TID>.log` | Source-line twin of a per-TID ordered log |
 | `asmcov.log` | Assembly PCs split out of the report: `0x<pc> <function> <file>:<line>: <asm text>` |

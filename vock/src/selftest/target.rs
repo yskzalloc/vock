@@ -48,6 +48,12 @@ pub fn target_cmd(vock: &str, args: &[&str]) -> String {
     format!("{vock} {}", args.join(" "))
 }
 
+/// Test 6 traced target: the same explicit write path as test 1, under
+/// `--mode dataflow`. Its syscalls carry values the harness knows (four
+/// write()s of 4096 bytes, ftruncate to 2048), which is what the
+/// argument/return-value assertions look for.
+pub const DATAFLOW_TARGET_ARGS: &[&str] = &["selftest", "target", "vfs-write"];
+
 /// Test 3 traced target: this same vock binary running the AF_ALG decrypt.
 pub const CRYPTO_TARGET_ARGS: &[&str] = &["selftest", "target", "crypto-decrypt"];
 
@@ -571,6 +577,15 @@ vng --rw -- vock --mode kcov --filter crypto --vmlinux ./vmlinux --kernel-src . 
 # the target write()s/read()s/ioctl()s {RUST_MISC_DEV} (built-in Rust\n\
 # sample); needs CONFIG_RUST=y and a kernel Rust toolchain (make rustavailable)"
         )),
+        "6" => Some(
+            "vng --rw -- vock --mode dataflow --vmlinux ./vmlinux --kernel-src . \\\n\
+    vock selftest target vfs-write\n\
+... and again with --btf instead of --vmlinux (kallsyms symbolization)\n\
+# needs CONFIG_KCOV_DATAFLOW_ARGS/RET=y, i.e. a kernel built with the\n\
+# kcov-dataflow clang (vng --build LLVM=/path/to/llvm-project/build/bin/);\n\
+# writes dataflow.log / dataflow.txt / dataflow.html + the usual coverage report"
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -583,7 +598,7 @@ pub fn help_raw_commands() -> String {
 configures + builds the kernel via `vng --force --configitem ... --build`;\n\
 `vock` is whichever binary you run, ./vock.bin in a build tree works too):\n",
     );
-    for t in ["1", "2", "3", "4", "5"] {
+    for t in ["1", "2", "3", "4", "5", "6"] {
         let block = raw_command(t).unwrap_or_default();
         let mut lines = block.lines();
         if let Some(first) = lines.next() {

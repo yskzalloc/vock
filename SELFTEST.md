@@ -22,7 +22,10 @@ vock selftest 3 --on vng-kvm --kernel-src ~/stable
 # Test 5: Rust-for-Linux module coverage (VM; skips without a kernel Rust toolchain)
 vock selftest 5 --on vng-kvm --kernel-src ~/stable
 
-# All four
+# Test 6: kcov-dataflow arguments + return values (VM; needs the kcov-dataflow clang)
+vock selftest 6 --on vng-kvm --kernel-src ~/linux --llvm /path/to/llvm-project/build/bin/
+
+# All six
 vock selftest --on vng-kvm --kernel-src ~/stable
 
 # CI (no KVM available)
@@ -33,7 +36,7 @@ vock selftest 1 --on vng-tcg --kernel-src ~/stable
 
 ```
 vock selftest [-h] [--on {host,vng-kvm,vng-tcg}] [--kernel-src PATH]
-              [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-5]
+              [--vmlinux PATH] [--llvm SUFFIX] [--no-build] [-v] [1-6]
 ```
 
 `vock selftest --help` also prints, for every test, the equivalent raw
@@ -51,7 +54,7 @@ separate from the harness.
 | `--no-build` | off | Skip the `make` step and use the existing `./vock.bin` |
 | `--record` | off | Record each selected test with asciinema into `selftest<N>.cast` |
 | `-v` | off | Verbose: show command output for debugging |
-| `1`-`4` | all | Run a specific test only |
+| `1`-`6` | all | Run a specific test only |
 
 ## Recording (asciinema)
 
@@ -85,6 +88,7 @@ runs with `--no-build`. The child's exit code is propagated
 | 3 | Filter + xts Crypto | vng | `--filter` narrowed xts(aes) decrypt coverage + plaintext verification |
 | 4 | KASAN bug hunt | vng | build a KASAN+KCOV kernel; loop a sample reproducer (MIDI UAF) for ≤30 min, watching for a KASAN report |
 | 5 | Rust module coverage | vng | build a KCOV kernel with `CONFIG_RUST` + the built-in `rust_misc_device` sample; write()/read()/ioctl() into it from userspace and assert `.rs` source lines (incl. `write_iter`) appear in the coverage; SKIPs without a kernel Rust toolchain |
+| 6 | kcov-dataflow | vng | build a `CONFIG_KCOV_DATAFLOW_ARGS/RET` kernel (needs the kcov-dataflow clang via `--llvm`, SKIPs otherwise); run `vfs-write` under `--mode dataflow` and assert its syscall arguments and return values (`ksys_write(…, 0x1000)`, `ftruncate(…, 0x800)`, expanded struct pointers, DWARF file:line) were captured, then repeat with `--btf` |
 
 ## Test 1: Coverage + Syscall + Syzlang (vng)
 
@@ -323,6 +327,36 @@ needs `rustc`, `bindgen-cli` (`cargo install bindgen-cli`) and the rustup
 entries): a Rust-enabled kernel emits dense coverage and small buffers
 saturate during process startup, silently losing the device ops.
 
+## Test 6: kcov-dataflow arguments + return values (vng)
+
+Builds a kernel with the kcov-dataflow feature and traces `vfs-write` under
+`--mode dataflow`, then asserts host-side that the argument and return
+values came back through the buffer:
+
+```
+--mode dataflow --vmlinux --kernel-src  vock selftest target vfs-write
+    → dataflow.log + dataflow.txt + dataflow.html + kerncov.log + coverage.html
+--mode dataflow --btf   vock selftest target vfs-write   (kallsyms symbolization)
+```
+
+The options `CONFIG_KCOV_DATAFLOW_ARGS`/`_RET` `depend on
+$(cc-option,-fsanitize-coverage=trace-args)`, so a stock clang makes Kconfig
+drop them and the test **SKIPs** naming the reason; pass
+`--llvm /path/to/llvm-project/build/bin/` (or an `LLVM=` that has the
+trace-args/trace-ret passes) to run it. It also SKIPs when the kernel tree
+has no `kernel/kcov_dataflow.c` (the series is not applied).
+
+Verifies: `dataflow.log` has ENTRY and RET records; `dataflow.txt` shows
+`ksys_write(…, 0x1000)` (the 4096-byte write) and its `0x1000 = ksys_write()`
+return, `ftruncate(…, 0x800)` (truncate to 2048), at least one expanded
+struct pointer argument (`{…}`), and DWARF file:line resolution; the function
+PCs feed the ordinary report so `srccov.log` and `coverage.html` are
+produced; and `--btf` names the functions through kallsyms with no vmlinux.
+The buffer is requested at the full 128 MiB (`VOCK_DATAFLOW_WORDS`) because
+the kernel buffer is linear: under `INSTRUMENT_ALL` the loader noise over a
+9p share is millions of records and a smaller buffer would fill before the
+workload runs.
+
 ## Target Programs
 
 Every traced workload is an explicit syscall sequence implemented in vock
@@ -394,8 +428,10 @@ itself is built with `cargo` (any `CC=` passed to `make` is ignored).
 ## GitHub CI
 
 The workflow lives in [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
-and runs tests 1, 2, 3 and 5 on x86_64 and arm64 runners (the CI installs
-`bindgen-cli` and `rust-src`, so test 5 runs rather than skipping). Each job writes a
+and runs tests 1, 2, 3, 5 and 6 on x86_64 and arm64 runners (the CI installs
+`bindgen-cli` and `rust-src`, so test 5 runs rather than skipping; test 6
+SKIPs on the hosted runners, whose distro clang has no trace-args/trace-ret
+passes — point `--llvm` at a kcov-dataflow LLVM build to run it). Each job writes a
 **summary table** (test, verdict, pass/fail/skip counts) to the Actions
 run's Summary tab, uploads every test's full log as its **own artifact**
 linked from that table, and appends the reproducible raw command for each

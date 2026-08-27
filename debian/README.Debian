@@ -6,6 +6,9 @@ Privileges
 
   * --mode kcov requires root and a kernel built with CONFIG_KCOV. Debian's
     stock kernels do not enable it, so this mode needs a self-built kernel.
+  * --mode dataflow requires root and a kernel built with
+    CONFIG_KCOV_DATAFLOW_ARGS/RET, which only the kcov-dataflow clang can
+    enable (see DATAFLOW.md); no distribution kernel has it.
   * --mode hw (Intel PT / AMD LBR / CoreSight) needs
     /proc/sys/kernel/perf_event_paranoid set to 1 or less, or root.
 

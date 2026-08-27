@@ -29,10 +29,28 @@ Hardware trace
 .BR hw )
 needs no kernel instrumentation and uses Intel Processor Trace or AMD LBR on
 x86-64, or CoreSight ETM on arm64.
+kcov-dataflow
+.RB ( \-\-mode
+.BR dataflow )
+needs a kernel built with
+.BR CONFIG_KCOV_DATAFLOW_ARGS " and " CONFIG_KCOV_DATAFLOW_RET
+(the kcov-dataflow clang) and records, for the traced task, every
+instrumented function's arguments and return value in execution order,
+written as
+.IR dataflow.log ", " dataflow.txt " and " dataflow.html
+next to the usual coverage report.
 .SH OPTIONS
 .TP
-.BR \-\-mode " " \fIkcov\fR|\fIhw\fR
+.BR \-\-mode " " \fIkcov\fR|\fIhw\fR|\fIdataflow\fR
 Coverage source. Default is hardware trace when available.
+.TP
+.BR \-\-remote\-handle " " \fIH\fR
+With
+.BR \-\-mode " " dataflow ,
+also publish a buffer for kernel code that brackets its work with
+.BR kcov_df_remote_start (\fIH\fR),
+written to
+.IR dataflow-remote.log .
 .TP
 .BR \-\-vmlinux " " \fIPATH\fR
 Uninstrumented vmlinux with debug info, used to resolve addresses.
@@ -122,6 +140,12 @@ requires root and a kernel with
 requires
 .I /proc/sys/kernel/perf_event_paranoid
 to be 1 or less, or root.
+.B \-\-mode
+.B dataflow
+requires root and a kernel with
+.BR CONFIG_KCOV_DATAFLOW_ARGS / RET ;
+see
+.I /usr/share/doc/vock/DATAFLOW.md.
 .SH SEE ALSO
 .BR perf (1),
 .BR strace (1),

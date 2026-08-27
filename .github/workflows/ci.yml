@@ -54,8 +54,7 @@ jobs:
         fi
         echo "##############"
 
-        git clone -b staging-testing --depth 1 \
-          https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
+        git clone -b kcov-dataflow --depth 1 https://github.com/yskzalloc/linux.git
 
     - name: Install rust
       run: |
@@ -110,7 +109,8 @@ jobs:
             mkdir -p "selftest-logs/$slug"
             for f in staging/kerncov.log staging/srccov.log staging/asmcov.log \
                      staging/coverage.html staging/coverage-*.html \
-                     staging/trace.log staging/trace.syz; do
+                     staging/trace.log staging/trace.syz \
+                     staging/dataflow.log staging/dataflow.txt staging/dataflow.html; do
                 [ -f "$f" ] && cp "$f" "selftest-logs/$slug/" || true
             done
             local line
@@ -157,6 +157,15 @@ jobs:
 
         run_test test5 5 "Test 5: Rust module coverage ($ON)" \
             ./vock.bin selftest 5 -v --on $ON $KSRC
+
+        # kcov-dataflow needs a clang with the trace-args/trace-ret passes
+        # (the kcov-dataflow LLVM fork). The distro clang has none, so on the
+        # hosted runners the kernel's CONFIG_KCOV_DATAFLOW_* silently drop
+        # and this test SKIPs, its verdict still shows the reason. Point
+        # `--llvm /path/to/llvm-project/build/bin/` at a built fork (or
+        # download a toolchain artifact from the kcov-dataflow CI) to run it.
+        run_test test6 6 "Test 6: kcov-dataflow arguments + return values ($ON)" \
+            ./vock.bin selftest 6 -v --on $ON $KSRC
 
         exit $rc
 
@@ -217,6 +226,17 @@ jobs:
           selftest-logs/test5/
         if-no-files-found: ignore
 
+    - name: Upload test 6 log
+      if: always()
+      id: up-test6
+      uses: actions/upload-artifact@v4
+      with:
+        name: selftest-6-${{ matrix.arch }}
+        path: |
+          selftest-logs/test6.log
+          selftest-logs/test6/
+        if-no-files-found: ignore
+
     - name: Job summary
       # Renders template/ACTION.md: {{ARCH}} is substituted inline, and the
       # {{RESULT_ROWS}} / {{RAW_COMMANDS}} placeholder lines are replaced by
@@ -229,6 +249,7 @@ jobs:
         URL_TEST2_GUEST: ${{ steps.up-test2-guest.outputs.artifact-url }}
         URL_TEST3: ${{ steps.up-test3.outputs.artifact-url }}
         URL_TEST5: ${{ steps.up-test5.outputs.artifact-url }}
+        URL_TEST6: ${{ steps.up-test6.outputs.artifact-url }}
         ARCH: ${{ matrix.arch }}
       run: |
         while IFS=$'\t' read -r slug raw verdict title line; do
@@ -238,6 +259,7 @@ jobs:
                 test2-guest) url="$URL_TEST2_GUEST" ;;
                 test3)       url="$URL_TEST3" ;;
                 test5)       url="$URL_TEST5" ;;
+                test6)       url="$URL_TEST6" ;;
                 *)           url="" ;;
             esac
             icon=$([ "$verdict" = PASS ] && echo ':white_check_mark:' || echo ':x:')

@@ -34,6 +34,7 @@ mod util;
 enum Coverage {
     Hw,
     Kcov,
+    Dataflow,
 }
 
 const HELP: &str = "\
@@ -51,6 +52,9 @@ coverage modes:
                     Intel PT (x86_64), AMD LBR (x86_64), CoreSight (arm64)
                     auto-detected based on available hardware
   --mode kcov     KCOV local + remote coverage (needs CONFIG_KCOV)
+  --mode dataflow kcov-dataflow: every instrumented function's arguments and
+                    return value, in order (needs CONFIG_KCOV_DATAFLOW_ARGS/RET,
+                    a kernel built with the kcov-dataflow clang); see DATAFLOW.md
 
 syscall tracking:
   --syscall [BACKEND]  track syscalls → trace.log
@@ -69,6 +73,8 @@ options:
   --btf               resolve PCs via /proc/kallsyms (no vmlinux needed)
   --ordered           sequential output: kcov per-TID coverage-<TID>.html,
                       hw a single time-ordered coverage.html
+  --remote-handle H   dataflow: also publish a buffer for kcov_df_remote_start(H)
+                      call sites (a kcov_remote_handle() value) → dataflow-remote.log
   --filter KW         filter coverage report to matching paths
   -d, --output-dir D  write all artifacts into D (created if missing)
   -A N, -B N, -C N    context lines in the processed coverage artifacts\n                      (kerncov.log, asmcov.log, coverage.html; default 3, patch-style)
@@ -78,6 +84,7 @@ examples:
   vock --vmlinux vmlinux /bin/ip addr show   full branch coverage
   vock --mode kcov /bin/ls /tmp       kernel coverage (KCOV)
   vock --mode kcov --ordered /bin/ip addr show  per-TID sequential trace
+  vock --mode dataflow --vmlinux vmlinux /bin/ls /tmp  arguments + return values
   vock --syscall /bin/ls /tmp         syscall tracking
   vock --syzlang /bin/ip addr show    trace.log + trace.syz
   vock execprog -stress prog.syz      mutate+execute variants in a loop
@@ -179,6 +186,7 @@ fn real_main() -> i32 {
     let mut ctx_before: i32 = -1;
     let mut output_dir: Option<String> = None;
     let mut ordered = false;
+    let mut remote_handle: Option<u64> = None;
     let mut cmd_idx: i64 = -1;
 
     let mut i = 1usize;
@@ -199,6 +207,20 @@ fn real_main() -> i32 {
             btf = true;
         } else if a == "--ordered" {
             ordered = true;
+        } else if a == "--remote-handle" && i + 1 < args.len() {
+            i += 1;
+            let v = args[i].as_str();
+            let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+                Some(h) => u64::from_str_radix(h, 16).ok(),
+                None => v.parse::<u64>().ok(),
+            };
+            match parsed {
+                Some(h) => remote_handle = Some(h),
+                None => {
+                    eprintln!("error: --remote-handle expects a number, got '{v}'");
+                    return 1;
+                }
+            }
         } else if a == "--filter" && i + 1 < args.len() {
             i += 1;
             filter = Some(args[i].clone());
@@ -419,9 +441,10 @@ fn real_main() -> i32 {
             match args[i].as_str() {
                 "kcov" => mode = Coverage::Kcov,
                 "hw" => mode = Coverage::Hw,
+                "dataflow" => mode = Coverage::Dataflow,
                 other => {
                     eprintln!(
-                        "error: unknown mode '{other}'\nvalid modes: hw, kcov\nrun: vock --help"
+                        "error: unknown mode '{other}'\nvalid modes: hw, kcov, dataflow\nrun: vock --help"
                     );
                     std::process::exit(1);
                 }
@@ -435,7 +458,7 @@ fn real_main() -> i32 {
 
     if cmd_idx == -1 {
         eprintln!(
-            "usage: vock [--mode hw|kcov] [--syscall] [--syzlang] <cmd> [args...]\n       vock selftest [--help]\n       vock --help"
+            "usage: vock [--mode hw|kcov|dataflow] [--syscall] [--syzlang] <cmd> [args...]\n       vock selftest [--help]\n       vock --help"
         );
         std::process::exit(1);
     }
@@ -454,12 +477,25 @@ fn real_main() -> i32 {
         eprintln!("error: --btf is mutually exclusive with --vmlinux");
         return 1;
     }
+    if remote_handle.is_some() && mode != Coverage::Dataflow {
+        eprintln!("error: --remote-handle only applies to --mode dataflow");
+        return 1;
+    }
     let euid = unsafe { libc::geteuid() };
     match mode {
         Coverage::Kcov => {
             if euid != 0 {
                 eprintln!(
                     "error: kcov mode requires root privileges\n  vock --mode kcov {}",
+                    cmd[0]
+                );
+                return 1;
+            }
+        }
+        Coverage::Dataflow => {
+            if euid != 0 {
+                eprintln!(
+                    "error: dataflow mode requires root privileges\n  vock --mode dataflow {}",
                     cmd[0]
                 );
                 return 1;
@@ -556,6 +592,17 @@ fn real_main() -> i32 {
             ctx_after,
             ctx_before,
             ordered,
+        ),
+        Coverage::Dataflow => mode::dataflow::run(
+            cmd,
+            kernel_src.as_deref(),
+            vmlinux.as_deref(),
+            filter.as_deref(),
+            btf,
+            ctx_after,
+            ctx_before,
+            ordered,
+            remote_handle,
         ),
     };
 
