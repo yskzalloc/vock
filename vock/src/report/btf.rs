@@ -60,13 +60,57 @@ fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
             break;
         }
     }
-    let Some(text_addr) = text_addr else { return 0 };
+    let Some(text_addr) = text_addr else {
+        eprintln!(
+            "btf: no _text/_stext in kallsyms ({} symbols); assuming offset 0",
+            syms.len()
+        );
+        return 0;
+    };
 
     let in_text = int_pcs
         .iter()
         .filter(|&&pc| pc >= text_addr && pc <= last)
         .count();
+
+    // The decision made here cannot be validated after the fact: a wrong
+    // offset still lands inside the symbol table and resolves to
+    // plausible-looking but unrelated functions. So state the inputs and the
+    // choice, always. Without this line a misattributed report is
+    // indistinguishable from a report of genuinely odd coverage.
+    let pct = if int_pcs.is_empty() {
+        0
+    } else {
+        in_text * 100 / int_pcs.len()
+    };
+    let decision = if in_text * 2 >= int_pcs.len() {
+        "same-kernel, offset 0"
+    } else if min_pc < text_addr {
+        if cfg!(target_arch = "x86_64") {
+            "foreign log, legacy x86 slide"
+        } else {
+            "foreign log, no slide on this arch"
+        }
+    } else if min_pc > last {
+        "foreign log, negative slide"
+    } else {
+        "offset 0"
+    };
+    eprintln!(
+        "btf: kallsyms text {text_addr:#x}..{last:#x} ({} syms), PCs \
+         {min_pc:#x}..{:#x}, {in_text}/{} in text ({pct}%) → {decision}",
+        syms.len(),
+        int_pcs.iter().copied().max().unwrap_or(0),
+        int_pcs.len(),
+    );
     if in_text * 2 >= int_pcs.len() {
+        if in_text < int_pcs.len() {
+            eprintln!(
+                "btf: {} PC(s) fall outside the kallsyms text range and \
+                 resolve to ?? ",
+                int_pcs.len() - in_text
+            );
+        }
         return 0; // same-kernel log
     }
     if min_pc < text_addr {
