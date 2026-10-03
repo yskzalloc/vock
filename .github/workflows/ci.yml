@@ -146,6 +146,12 @@ jobs:
         #   * AMD LBR is the only HW trace engine reachable on GitHub runners
         #   * arm64 runners expose no CoreSight
         # So on Intel runners this is expected to SKIP rather than trace.
+        #
+        # Note the provenance caveat: `--on host` traces the *running* kernel
+        # while $KSRC points at the staging tree we just built, so if this ever
+        # did trace here it would symbolize against the wrong vmlinux. It skips
+        # on hosted runners, so that cannot bite; the `hw-baremetal` job below
+        # is the one that matches symbols to the running kernel properly.
         run_test test2-host 2 "Test 2.1: HW trace (host)" \
             as_root ./vock.bin selftest 2 -v --on host --no-build $KSRC
 
@@ -268,3 +274,378 @@ jobs:
       run: |
         sudo dmesg
 
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # `--mode hw` on x86_64 bare metal, against the running Ubuntu kernel.
+  #
+  # The matrix job above cannot test hardware trace for real: GitHub's hosted
+  # ubuntu runners are Azure VMs, where Intel PT is not exposed to guests
+  # (disabled after CVE-2024-53135) and AMD branch stacks are not virtualized
+  # at all, so `perf_event_open` with branch sampling fails and selftest 2
+  # either SKIPs or marks its pass `[IP-sampling fallback]`.
+  #
+  # This job therefore runs on a self-hosted bare-metal x86_64 Ubuntu host and
+  # exists to cover the one thing a VM structurally cannot: a real trace stream
+  # (Intel PT) or a real branch-stack sampler (AMD LBR + IBS), symbolized
+  # against the *running* kernel's own debug symbols and source.
+  #
+  # Set the repository variable HW_BAREMETAL_RUNNER to the runner's label set,
+  # e.g. "self-hosted,linux,X64,baremetal", to enable it. Without the variable
+  # the job is skipped rather than queueing forever on a label nobody has.
+  # ───────────────────────────────────────────────────────────────────────────
+  hw-baremetal:
+    name: hw-baremetal (x86_64, running kernel)
+    if: vars.HW_BAREMETAL_RUNNER != ''
+    runs-on: ${{ vars.HW_BAREMETAL_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Host info
+      run: |
+        set -x
+        uname -a
+        grep -m1 'model name' /proc/cpuinfo
+        grep -m1 vendor_id /proc/cpuinfo
+        # The capability check vock itself performs: a PMU node only exists
+        # when the driver bound, which is what distinguishes metal from a VM.
+        ls -d /sys/bus/event_source/devices/intel_pt \
+              /sys/bus/event_source/devices/ibs_op 2>/dev/null || true
+        grep -o intel_pt /proc/cpuinfo | head -1 || true
+        # Refuse early and loudly if this is not actually bare metal, rather
+        # than producing an IP-sampling report that looks like a trace stream.
+        if systemd-detect-virt --quiet; then
+            echo "::error::HW_BAREMETAL_RUNNER points at a $(systemd-detect-virt) guest."
+            echo "Intel PT is not exposed to guests and AMD branch stacks are not"
+            echo "virtualized; use --mode kcov in VMs. Failing instead of"
+            echo "reporting statistical coverage as if it were a trace stream."
+            exit 1
+        fi
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        # binutils: readelf/addr2line, used for the provenance checks below and
+        #           as vock's VOCK_ADDR2LINE fallback.
+        # libcap2-bin: setcap, for the normal-user eBPF backend.
+        # dpkg-dev: dpkg-source, to unpack the kernel source with Ubuntu's
+        #           patch series applied (an unpatched tarball would give
+        #           correct function names on wrong line numbers).
+        sudo apt-get install -y clang binutils libcap2-bin dpkg-dev \
+                                python3 curl ca-certificates iproute2
+
+    - name: Install rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Build vock
+      run: |
+        make CC=clang
+        cargo --version && rustc --version
+
+    # ── source matching ───────────────────────────────────────────────────────
+    # The point of this job. `--mode hw` decodes the running kernel's
+    # instruction bytes and resolves its addresses, so the vmlinux and the
+    # source tree must come from the exact build that is running. A mismatch
+    # does not error: it produces a complete, confident, wrong report.
+    - name: Match debug symbols and source to the running kernel
+      id: match
+      run: |
+        set -euo pipefail
+        KVER=$(uname -r)
+        echo "running kernel: $KVER"
+
+        # 1 · debug symbols. Ubuntu ships kernel dbgsym in ddebs.ubuntu.com,
+        #     not the main archive, so the pocket has to be added first.
+        sudo apt-get install -y ubuntu-dbgsym-keyring
+        CODENAME=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\n' \
+            "$CODENAME" "$CODENAME-updates" "$CODENAME-proposed" \
+            | sudo tee /etc/apt/sources.list.d/ddebs.list
+        sudo apt-get update
+
+        # The signed image package is linux-image-$KVER, built from the
+        # `linux-signed-*` source package; its symbols live in the *unsigned*
+        # dbgsym. Try both spellings, old releases used the other one.
+        DBG=""
+        for p in "linux-image-unsigned-$KVER-dbgsym" "linux-image-$KVER-dbgsym"; do
+            if sudo apt-get install -y "$p"; then DBG="$p"; break; fi
+        done
+        if [ -z "$DBG" ]; then
+            echo "::error::no dbgsym package for $KVER in ddebs.ubuntu.com."
+            echo "The running kernel predates the archive's retention window;"
+            echo "reboot into a current kernel or pin one that still has ddebs."
+            exit 1
+        fi
+        VMLINUX=$(dpkg -L "$DBG" | grep -E '/vmlinux(-|$)' | head -1)
+        test -s "$VMLINUX"
+        echo "dbgsym package: $DBG"
+        echo "vmlinux:        $VMLINUX"
+
+        # 2 · source, with Ubuntu's patch series applied. `apt-get source`
+        #     runs dpkg-source -x for us; deb-src has to be enabled first, and
+        #     noble+ uses the deb822 layout while older releases use the
+        #     one-line one.
+        if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+            sudo sed -i 's/^Types: deb$/Types: deb deb-src/' \
+                /etc/apt/sources.list.d/ubuntu.sources
+        else
+            sudo sed -i 's/^# *deb-src/deb-src/' /etc/apt/sources.list
+        fi
+        sudo apt-get update
+        mkdir -p "$HOME/ksrc" && cd "$HOME/ksrc"
+        # Fetch by binary package name so apt picks the exact source version
+        # that produced the running image, not whatever is newest.
+        apt-get source "linux-image-unsigned-$KVER" \
+            || apt-get source "linux-image-$KVER"
+        KSRC=$(find . -maxdepth 1 -type d -name 'linux-*' | head -1)
+        KSRC=$(cd "$KSRC" && pwd)
+        test -f "$KSRC/Makefile"
+        echo "kernel source:  $KSRC"
+
+        {
+          echo "vmlinux=$VMLINUX"
+          echo "ksrc=$KSRC"
+          echo "kver=$KVER"
+          echo "dbgpkg=$DBG"
+        } >> "$GITHUB_OUTPUT"
+
+    # Relax the sysctls before verifying, because the KASLR check below reads
+    # /proc/kallsyms, which kptr_restrict blanks to zeros.
+    - name: Grant bare-metal tracing privileges
+      run: |
+        set -x
+        # Intel PT / AMD LBR as a normal user: the kernel only forbids kernel
+        # profiling at perf_event_paranoid >= 2.
+        sudo sysctl -w kernel.perf_event_paranoid=-1
+        # Exact KASLR offset from /proc/kallsyms _stext instead of vock's
+        # median heuristic, which cannot reject a wrong guess.
+        sudo sysctl -w kernel.kptr_restrict=0
+        # selftest 2 also exercises the three syscall backends on the host
+        # pass. The eBPF one needs all three of these as a normal user; each
+        # missing step SKIPs with the exact command, so none of this is fatal.
+        sudo sysctl -w kernel.unprivileged_bpf_disabled=0 || true
+        sudo mount -o remount,mode=755,gid="$(id -g)" /sys/kernel/tracing || true
+        # setcap must come after `make`: writing the binary drops file
+        # capabilities, which is also why the selftest runs with --no-build.
+        sudo setcap cap_bpf,cap_perfmon+ep ./vock.bin || true
+        getcap ./vock.bin || true
+
+    - name: Verify the symbols really match the running kernel
+      run: |
+        set -euo pipefail
+        VMLINUX='${{ steps.match.outputs.vmlinux }}'
+
+        # Check 1 · linux_banner. The vmlinux embeds the exact version,
+        # build date and compiler; for the same build it is byte-identical to
+        # /proc/version. This catches "same version, different build", the
+        # mismatch that otherwise shows correct functions on wrong lines.
+        RUN=$(cat /proc/version)
+        VM=$(strings -a "$VMLINUX" | grep -m1 '^Linux version ')
+        echo "running: $RUN"
+        echo "vmlinux: $VM"
+        test "$RUN" = "$VM" || { echo "::error::linux_banner mismatch"; exit 1; }
+
+        # Check 2 · GNU build-id, the authoritative test. /sys/kernel/notes is
+        # the running kernel's raw note section; compare its NT_GNU_BUILD_ID
+        # against the vmlinux's.
+        python3 - "$VMLINUX" <<'PY'
+        import struct, subprocess, sys
+
+        def gnu_build_id(blob):
+            off = 0
+            while off + 12 <= len(blob):
+                nsz, dsz, typ = struct.unpack_from('<III', blob, off)
+                off += 12
+                name = blob[off:off + nsz].rstrip(b'\0')
+                off += (nsz + 3) & ~3
+                desc = blob[off:off + dsz]
+                off += (dsz + 3) & ~3
+                if name == b'GNU' and typ == 3:   # NT_GNU_BUILD_ID
+                    return desc.hex()
+            return None
+
+        with open('/sys/kernel/notes', 'rb') as f:
+            running = gnu_build_id(f.read())
+
+        out = subprocess.run(['readelf', '-n', sys.argv[1]],
+                             capture_output=True, text=True).stdout
+        vm = next((l.split(':')[-1].strip() for l in out.splitlines()
+                   if 'Build ID' in l), None)
+
+        print('running build-id:', running)
+        print('vmlinux build-id:', vm)
+        if not running or not vm:
+            print('::warning::build-id unavailable on one side, '
+                  'relying on the linux_banner check')
+            sys.exit(0)
+        if running != vm:
+            print('::error::build-id mismatch: this vmlinux is a different build')
+            sys.exit(1)
+        print('build-id matches')
+        PY
+
+        # Check 3 · the KASLR offset vock will compute must be 2 MiB-aligned,
+        # x86's virtual-base granularity. An unaligned difference means the
+        # kallsyms and the vmlinux do not belong together. This is a bonus
+        # check on top of the authoritative build-id one, so an unreadable
+        # kallsyms warns rather than failing the job.
+        RS=$(awk '$3=="_stext"{print $1; exit}' /proc/kallsyms 2>/dev/null || true)
+        VS=$(readelf -sW "$VMLINUX" | awk '$8=="_stext"{print $2; exit}')
+        if [ -z "$RS" ] || [ "$RS" = "0000000000000000" ]; then
+            echo "::warning::/proc/kallsyms gives no _stext address"
+            echo "(kptr_restrict, or no CAP_SYSLOG). vock will fall back to its"
+            echo "median KASLR heuristic, which cannot reject a wrong guess."
+        else
+            python3 - "$RS" "$VS" <<'PY'
+        import sys
+        r, v = int(sys.argv[1], 16), int(sys.argv[2], 16)
+        off = (r - v) & 0xFFFFFFFFFFFFFFFF
+        print(f"kallsyms _stext 0x{r:x}  vmlinux _stext 0x{v:x}")
+        print(f"KASLR offset    0x{off:x}")
+        if off % (2 << 20):
+            print("::error::offset is not 2 MiB-aligned")
+            sys.exit(1)
+        print("offset is 2 MiB-aligned (vock KASLR tier 2 will be exact)")
+        PY
+        fi
+
+    - name: vock selftest 2 (HW trace, running kernel)
+      id: selftest
+      run: |
+        set -uo pipefail
+        mkdir -p hw-logs
+        # --on host: no kernel is built, the running one is traced.
+        # --no-build: keep the file capabilities granted above.
+        ./vock.bin selftest 2 -v --on host --no-build \
+            --vmlinux '${{ steps.match.outputs.vmlinux }}' \
+            --kernel-src '${{ steps.match.outputs.ksrc }}' \
+            2>&1 | tee hw-logs/selftest2.log
+        rc=${PIPESTATUS[0]}
+        grep -oE 'Intel PT|AMD LBR|CoreSight' hw-logs/selftest2.log \
+            | head -1 > hw-logs/engine.txt || true
+        echo "engine=$(cat hw-logs/engine.txt 2>/dev/null)" >> "$GITHUB_OUTPUT"
+        echo "results=$(grep -oE 'Results: .*' hw-logs/selftest2.log | tail -1)" \
+            >> "$GITHUB_OUTPUT"
+        exit $rc
+
+    # Independent of the selftest: one real command, traced and symbolized
+    # against the matched kernel, asserting the addresses resolve to this
+    # kernel's actual source. This is the end-to-end proof that the source
+    # matching above worked.
+    - name: Source-matched report for a real command
+      id: report
+      if: always() && steps.match.outcome == 'success'
+      run: |
+        set -uo pipefail
+        ./vock.bin --mode hw \
+            --vmlinux '${{ steps.match.outputs.vmlinux }}' \
+            --kernel-src '${{ steps.match.outputs.ksrc }}' \
+            -d hw-logs/report \
+            /usr/bin/ip addr show 2>&1 | tee hw-logs/report.log
+        rc=${PIPESTATUS[0]}
+
+        S=hw-logs/report/srccov.log
+        if [ ! -s "$S" ]; then
+            echo "::error::srccov.log is empty: nothing resolved"
+            exit 1
+        fi
+        total=$(wc -l < "$S")
+        unres=$(grep -c '??' "$S" || true)
+        echo "resolved $((total - unres)) of $total PCs"
+
+        # A matched vmlinux resolves PCs into real kernel subsystem paths. A
+        # mismatched one tends to resolve everywhere and nowhere, so require
+        # recognisable directories rather than merely non-empty output.
+        echo "── covered subsystems ──"
+        cut -d' ' -f3 "$S" | grep -v '^??' | cut -d/ -f1 \
+            | sort | uniq -c | sort -rn | head -15 | tee hw-logs/subsystems.txt
+        if ! grep -qE '^ *[0-9]+ (net|fs|kernel|mm|drivers|arch|lib|security)$' \
+             hw-logs/subsystems.txt; then
+            echo "::error::no recognisable kernel subsystem in the report;"
+            echo "the vmlinux probably does not match the running kernel"
+            exit 1
+        fi
+        # `ip addr show` must reach the network stack. If it does not, the
+        # report is not describing this command.
+        grep -q '^ *[0-9]* net$' hw-logs/subsystems.txt \
+            || echo "::warning::no net/ coverage from 'ip addr show'"
+
+        # Intel PT decoder stream health. Silence means every byte of the AUX
+        # buffer was a recognized packet consumed at its true encoded length;
+        # undecodable packets or overflows mean coverage was lost in between.
+        echo "── decoder stream health ──"
+        if grep -E 'undecodable packet|buffer overflow|ends mid-packet' \
+             hw-logs/report.log; then
+            echo "::warning::the PT stream was not fully decodable (see above)"
+        else
+            echo "clean: no undecodable packets, overflows or truncation"
+        fi
+        # A 4 MiB hw_trace.bin means the AUX buffer wrapped and the decode is
+        # a mixture of old and new bytes.
+        if [ -f hw-logs/report/hw_trace.bin ]; then
+            sz=$(stat -c %s hw-logs/report/hw_trace.bin)
+            echo "hw_trace.bin: $sz bytes"
+            [ "$sz" -eq 4194304 ] && echo "::warning::AUX buffer full; trace wrapped"
+        fi
+        echo "unresolved=$unres/$total" >> "$GITHUB_OUTPUT"
+        exit $rc
+
+    - name: Upload hw-baremetal artifacts
+      if: always()
+      id: up-hw
+      uses: actions/upload-artifact@v4
+      with:
+        name: hw-baremetal-x86_64
+        path: hw-logs/
+        if-no-files-found: ignore
+
+    - name: Job summary
+      if: always()
+      env:
+        URL_HW: ${{ steps.up-hw.outputs.artifact-url }}
+      run: |
+        {
+          echo "# vock \`--mode hw\` on bare metal (x86_64)"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Runner | \`$(hostname)\` |"
+          echo "| CPU | $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2-) |"
+          echo "| Kernel | \`$(uname -r)\` |"
+          echo "| Engine | ${{ steps.selftest.outputs.engine || 'n/a' }} |"
+          echo "| dbgsym | \`${{ steps.match.outputs.dbgpkg }}\` |"
+          echo "| Source | \`${{ steps.match.outputs.ksrc }}\` |"
+          echo "| selftest 2 | ${{ steps.selftest.outputs.results || 'did not complete' }} |"
+          echo "| Unresolved PCs | ${{ steps.report.outputs.unresolved || 'n/a' }} |"
+          echo "| Artifacts | [download]($URL_HW) |"
+          echo
+          echo "Symbols and source are matched to the **running** kernel and"
+          echo "verified three ways before tracing: \`linux_banner\` identity,"
+          echo "GNU build-id identity, and a 2 MiB-aligned KASLR offset."
+          echo
+          if [ -s hw-logs/subsystems.txt ]; then
+              echo "## Kernel subsystems reached by \`ip addr show\`"
+              echo
+              echo '```'
+              cat hw-logs/subsystems.txt
+              echo '```'
+          fi
+          echo
+          echo "## Reproduce by hand"
+          echo
+          echo '```sh'
+          echo "sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0"
+          echo "sudo apt-get install -y linux-image-unsigned-\$(uname -r)-dbgsym"
+          echo "apt-get source linux-image-unsigned-\$(uname -r)   # dpkg-source -x applies the patches"
+          echo "./vock.bin selftest 2 --on host --no-build \\"
+          echo "    --vmlinux /usr/lib/debug/boot/vmlinux-\$(uname -r) \\"
+          echo "    --kernel-src ./linux-\$(uname -r | cut -d- -f1)"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Report
+      if: always()
+      run: sudo dmesg | tail -50

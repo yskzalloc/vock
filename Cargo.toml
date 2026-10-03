@@ -14,6 +14,11 @@ exclude = [
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
+# Minimum supported Rust version. Bound by Option::is_none_or (1.82); behind
+# it sit the c"..." literal in fuzz/pseudo_syscalls.rs (1.77) and integer
+# div_ceil (1.73). Declared here so cargo enforces it instead of it drifting
+# away from the bound in debian/control.
+rust-version = "1.82"
 
 [profile.release]
 opt-level = 2

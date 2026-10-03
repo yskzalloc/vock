@@ -27,6 +27,7 @@ kerncov_prog*
 local-*.log
 remote-*.log
 remote_coverage.log
+hw_trace.bin
 
 # ─── test data ───────────────────────────────────────────────────────
 secure_block*

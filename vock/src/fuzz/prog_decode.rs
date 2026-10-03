@@ -646,11 +646,30 @@ pub struct Arena {
     used: Vec<u64>,
     /// Sorted addresses of fixed objects, used to clip over-wide writes.
     fixed: Vec<u64>,
+    /// Held for the arena's lifetime under `cfg(test)` only; see `ARENA_LOCK`.
+    #[cfg(test)]
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
+
+/// There can only be one arena per address space: `map()` is `MAP_FIXED` at
+/// `DATA_OFFSET`. In production that is fine, one process maps one arena. The
+/// test harness, however, runs tests as threads of a single process, so two
+/// tests mapping an arena concurrently would have the second's `MAP_FIXED`
+/// silently replace the first's mapping and the first's `Drop` unmap it out
+/// from under the second. Holding this for the arena's whole lifetime
+/// serializes them, and living inside `Arena` means no test can forget to.
+#[cfg(test)]
+static ARENA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Arena {
     /// Reserve the data arena (syzkaller's `MakeDataMmap` preamble).
     pub fn map() -> Option<Arena> {
+        // Taken before the mmap so the lock covers the mapping itself.
+        // A panicking test poisons it; the mapping is still exclusive, so
+        // recover rather than cascade failures into every later arena test.
+        #[cfg(test)]
+        let _guard = ARENA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let p = unsafe {
             libc::mmap(
                 DATA_OFFSET as *mut libc::c_void,
@@ -669,6 +688,8 @@ impl Arena {
             len: ARENA_SIZE,
             used: vec![0; ARENA_SIZE / GRANULE / 64 + 1],
             fixed: Vec::new(),
+            #[cfg(test)]
+            _guard,
         })
     }
 

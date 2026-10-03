@@ -1,0 +1,7 @@
+Tests: smoke
+Depends:
+ @,
+ binutils,
+ gcc,
+ libc6-dev,
+Restrictions: allow-stderr

@@ -4,8 +4,9 @@ Priority: optional
 Maintainer: Yunseong Kim <yunseong.kim@est.tech>
 Build-Depends:
  debhelper-compat (= 13),
- cargo,
- rustc (>= 1.70),
+ cargo:native,
+ rustc:native (>= 1.82),
+ libstd-rust-dev,
  dpkg-dev (>= 1.22),
 Standards-Version: 4.7.2
 Homepage: https://github.com/yskzalloc/vock
@@ -21,9 +22,8 @@ Depends:
 Recommends:
  binutils,
 Suggests:
- linux-image-amd64,
+ linux-source,
  virtme-ng,
- kcapi-tools,
 Description: map a userspace program to the kernel code it exercises
  vock runs a command and reports exactly which kernel source lines that
  command caused to execute, as an annotated HTML or terminal report.

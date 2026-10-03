@@ -1,0 +1,156 @@
+#!/bin/sh
+# autopkgtest for the installed vock package.
+#
+# Everything here must work on a stock Debian kernel as an ordinary user, so
+# it deliberately exercises none of the coverage engines: KCOV needs
+# CONFIG_KCOV (not enabled in Debian's kernels) and hardware trace needs a
+# PMU that no VM exposes. What is testable is the parts that do not depend on
+# the kernel at all -- the CLI contract, the report pipeline, prog2c codegen,
+# the privilege gates refusing cleanly, and the shape of the shipped ELFs.
+set -eu
+
+: "${AUTOPKGTEST_TMP:=$(mktemp -d)}"
+cd "$AUTOPKGTEST_TMP"
+
+pass() { echo "PASS: $*"; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# ── the binary and its man page are where the package says they are ─────────
+command -v vock >/dev/null || fail "vock is not on PATH"
+test -x /usr/bin/vock      || fail "/usr/bin/vock is not executable"
+pass "vock installed at /usr/bin/vock"
+
+man --where vock >/dev/null 2>&1 || fail "vock(1) is not installed"
+pass "vock(1) man page installed"
+
+# ── --help works and advertises both coverage modes ─────────────────────────
+vock --help > help.txt 2>&1 || fail "vock --help exited non-zero"
+grep -q -- '--mode hw'   help.txt || fail "--help does not mention --mode hw"
+grep -q -- '--mode kcov' help.txt || fail "--help does not mention --mode kcov"
+pass "--help lists both coverage modes"
+
+for sub in execprog prog2c selftest; do
+    vock "$sub" --help >/dev/null 2>&1 || fail "vock $sub --help exited non-zero"
+done
+pass "execprog/prog2c/selftest --help all work"
+
+# ── the coverage shim: private helper, no SONAME (per README.Debian) ────────
+SHIM=/usr/lib/vock/kcov.so
+test -f "$SHIM" || fail "$SHIM is missing"
+# Accept either wording: binutils prints "Shared object file" for a plain
+# .so and "Position-Independent Executable file" for a PIE, both ET_DYN.
+readelf -hW "$SHIM" | grep -qE 'Type:.*DYN' \
+    || fail "$SHIM is not ET_DYN"
+if readelf -dW "$SHIM" | grep -q SONAME; then
+    fail "$SHIM has a SONAME; it is documented as a private helper"
+fi
+pass "coverage shim is a SONAME-less private shared object"
+
+# ── hardening, which debian/rules forwards into RUSTFLAGS ───────────────────
+for f in /usr/bin/vock "$SHIM"; do
+    readelf -lW "$f" | grep -q GNU_RELRO  || fail "$f has no RELRO segment"
+    readelf -dW "$f" | grep -q BIND_NOW   || fail "$f is not BIND_NOW"
+done
+# A PIE is ET_DYN; newer binutils spells it out, older ones say
+# "Shared object file" for an executable too.
+readelf -hW /usr/bin/vock | grep -qE 'Type:.*DYN' \
+    || fail "/usr/bin/vock is not a PIE"
+pass "full RELRO + BIND_NOW on both ELFs, and vock is a PIE"
+
+# A build-id is what lets the separate vock-dbgsym package be matched up.
+readelf -nW /usr/bin/vock | grep -q 'Build ID' \
+    || fail "/usr/bin/vock carries no GNU build-id"
+pass "build-id present (vock-dbgsym is matchable)"
+
+# ── option validation: the mutually exclusive and unknown-value paths ───────
+if vock --btf --vmlinux /dev/null /bin/true 2>err.txt; then
+    fail "--btf with --vmlinux should be rejected"
+fi
+grep -q 'mutually exclusive' err.txt \
+    || fail "--btf + --vmlinux did not explain the conflict"
+pass "--btf and --vmlinux are rejected together"
+
+if vock --mode nonsense /bin/true 2>err.txt; then
+    fail "an unknown --mode should be rejected"
+fi
+pass "unknown --mode is rejected"
+
+# ── the privilege gates refuse cleanly rather than crashing ─────────────────
+# Only meaningful unprivileged; autopkgtest may run this as root.
+if [ "$(id -u)" -ne 0 ]; then
+    set +e
+    vock --mode kcov /bin/true 2>err.txt
+    rc=$?
+    set -e
+    test "$rc" -ne 0 || fail "--mode kcov as non-root should fail"
+    test "$rc" -lt 128 || fail "--mode kcov died from signal $((rc - 128))"
+    grep -qi 'root' err.txt || fail "--mode kcov did not mention needing root"
+    pass "--mode kcov without root fails cleanly (exit $rc, no signal)"
+else
+    echo "SKIP: running as root, cannot test the unprivileged kcov gate"
+fi
+
+# ── the report pipeline, with no vmlinux and no kernel source ──────────────
+# Synthetic kernel PCs: vock must accept them, report the count, and say it
+# has no vmlinux rather than failing or inventing source.
+cat > kerncov.log <<'EOF'
+0xffffffff81001000
+0xffffffff81001234
+0xffffffff81002000
+EOF
+vock report --log kerncov.log > report.txt 2>&1 \
+    || fail "vock report exited non-zero on a vmlinux-less log"
+grep -qE '3 PCs|no vmlinux' report.txt \
+    || fail "vock report did not describe the vmlinux-less outcome"
+pass "report accepts a raw log and reports honestly without a vmlinux"
+
+# srccov.log is the documented human-readable twin and is itself valid input,
+# so a second pass over it must also succeed.
+if [ -s srccov.log ]; then
+    vock report --log srccov.log >/dev/null 2>&1 \
+        || fail "srccov.log is not accepted as --log input"
+    pass "srccov.log round-trips as report input"
+fi
+
+# -d must place artifacts in the named directory, creating it.
+vock report --log kerncov.log -d outdir >/dev/null 2>&1 \
+    || fail "vock report -d exited non-zero"
+test -d outdir || fail "-d did not create the output directory"
+pass "-d writes artifacts into a created directory"
+
+# ── prog2c generates C that actually compiles ──────────────────────────────
+cat > trace.syz <<'EOF'
+openat(0xffffffffffffff9c, 0x20000000, 0x2, 0x0) = 3
+read(0x3, 0x20000100, 0x10) = 16
+close(0x3) = 0
+EOF
+vock prog2c trace.syz -o repro.c >/dev/null 2>&1 \
+    || fail "vock prog2c exited non-zero"
+test -s repro.c || fail "prog2c produced no output"
+grep -q 'syscall(' repro.c || fail "prog2c output issues no syscall"
+gcc -Wall -o repro repro.c || fail "prog2c output does not compile"
+pass "prog2c emits a standalone C reproducer that compiles"
+
+# ── execprog diagnoses an unsupported pseudo-syscall instead of faking it ──
+# syz_kvm_setup_cpu is documented as returning ENOSYS and being named on
+# startup; it must not silently appear to succeed.
+cat > pseudo.syz <<'EOF'
+r0 = syz_kvm_setup_cpu(&(0x7f0000000000)="00", 0x0, 0x0, 0x0, 0x0, 0x0, 0x0)
+EOF
+vock execprog pseudo.syz > execprog.txt 2>&1 || true
+grep -q 'ENOSYS' execprog.txt \
+    || fail "execprog did not name the unimplemented pseudo-syscall"
+pass "execprog names unimplemented pseudo-syscalls on startup"
+
+# ── vock fuzz is documented as unimplemented; it must say so, not pretend ──
+set +e
+vock fuzz /bin/true > fuzz.txt 2>&1
+rc=$?
+set -e
+grep -qi 'not implemented' fuzz.txt \
+    || fail "vock fuzz did not report itself unimplemented"
+test "$rc" -eq 2 || fail "vock fuzz should exit 2, got $rc"
+pass "vock fuzz reports itself unimplemented and exits 2"
+
+echo
+echo "all smoke tests passed"

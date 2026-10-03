@@ -8,13 +8,69 @@
 
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 export CARGO_HOME = $(CURDIR)/debian/cargo_home
+
 include /usr/share/dpkg/architecture.mk
+include /usr/share/dpkg/buildflags.mk
+# DEB_HOST_RUST_TYPE, shipped by rustc. Guarded with wildcard rather than
+# `-include`: a missing include target is matched by the catch-all `%:` rule
+# below, which would invoke dh with the makefile's name as a sequence. A
+# cross build that needs this and cannot find it is a hard error further down
+# rather than a silently wrong-architecture binary.
+ifneq (,$(wildcard /usr/share/rustc/architecture.mk))
+include /usr/share/rustc/architecture.mk
+endif
+
+# cargo does not read dpkg-buildflags, so DEB_BUILD_MAINT_OPTIONS on its own
+# would have no effect on this build. rustc already defaults to PIE, full
+# RELRO and BIND_NOW on Debian; forwarding the linker flags makes that
+# explicit and keeps any future hardening=... change effective. The resulting
+# ELF properties are asserted by debian/tests/smoke.
+export RUSTFLAGS += $(patsubst %,-Clink-arg=%,$(filter -Wl%,$(LDFLAGS)))
+
+# Emit debug info so vock-dbgsym is actually useful. Cargo's release profile
+# carries none by default, which left the automatic -dbgsym package empty
+# (lintian: debug-file-with-no-debug-symbols). dh_strip moves it out of the
+# shipped binaries into vock-dbgsym.
+export CARGO_PROFILE_RELEASE_DEBUG = 2
 
 # A private helper directory, not a multiarch library path: kcov.so is loaded
 # by vock alone and the package is not Multi-Arch: same, so co-installability
 # across architectures does not apply. /usr/lib/vock is compiled into the
 # binary's search path, so no build-time path substitution is needed.
 LIBDIR = usr/lib/vock
+
+# Cross-building: name the Rust target explicitly, which also moves the
+# artifacts under target/<triple>/release. A native build keeps the default
+# path, so nothing changes on a buildd building for its own architecture.
+ifeq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+CARGO_TARGET =
+ARTIFACTS = target/release
+else
+ifeq ($(DEB_HOST_RUST_TYPE),)
+$(error cross-building for $(DEB_HOST_ARCH) needs DEB_HOST_RUST_TYPE from \
+/usr/share/rustc/architecture.mk: install rustc:native)
+endif
+CARGO_TARGET = --target $(DEB_HOST_RUST_TYPE)
+ARTIFACTS = target/$(DEB_HOST_RUST_TYPE)/release
+endif
+
+# Honour parallel=N from DEB_BUILD_OPTIONS.
+CARGO_JOBS = $(patsubst parallel=%,-j%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+
+CARGO_FLAGS = --release --offline --locked $(CARGO_TARGET) $(CARGO_JOBS)
+
+# The test suite runs the built binaries, so it is skipped when cross-building
+# as well as under nocheck. dh_auto_test's own nocheck handling does not apply
+# to an overridden target, so the check has to be made here explicitly.
+RUN_TESTS = yes
+ifneq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+RUN_TESTS = no
+NO_TESTS_BECAUSE = DEB_BUILD_OPTIONS contains nocheck
+endif
+ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+RUN_TESTS = no
+NO_TESTS_BECAUSE = cross-building for $(DEB_HOST_ARCH), cannot run the binaries
+endif
 
 %:
 	dh $@
@@ -26,18 +82,22 @@ debian/cargo_home/config.toml:
 	printf '[source.crates-io]\nreplace-with = "vendored-sources"\n\n[source.vendored-sources]\ndirectory = "$(CURDIR)/debian/vendor"\n' > $@
 
 override_dh_auto_build: debian/cargo_home/config.toml
-	cargo build --release --offline --locked
+	cargo build $(CARGO_FLAGS)
 
 override_dh_auto_test: debian/cargo_home/config.toml
-	cargo test --release --offline --locked
+ifeq ($(RUN_TESTS),yes)
+	cargo test $(CARGO_FLAGS)
+else
+	@echo "dh_auto_test: skipping the test suite ($(NO_TESTS_BECAUSE))"
+endif
 
 override_dh_auto_install:
-	install -D -m 0755 target/release/vock \
+	install -D -m 0755 $(ARTIFACTS)/vock \
 	  debian/vock/usr/bin/vock
 	# The LD_PRELOAD coverage shim is a private helper, not a public library:
 	# it is dlopened by vock alone, has no SONAME and no stable ABI, so it
 	# belongs under a private directory rather than in the linker path.
-	install -D -m 0644 target/release/libkcov_preload.so \
+	install -D -m 0644 $(ARTIFACTS)/libkcov_preload.so \
 	  debian/vock/$(LIBDIR)/kcov.so
 
 override_dh_auto_clean:
