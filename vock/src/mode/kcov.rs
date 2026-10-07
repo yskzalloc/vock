@@ -15,6 +15,11 @@ const KCOV_DISABLE: libc::c_ulong = 0x6365;
 const KCOV_REMOTE_ENABLE: libc::c_ulong = 0x4018_6366;
 const KCOV_TRACE_PC: u32 = 0;
 
+/// Coverage the parent collects through its own KCOV_REMOTE_ENABLE common
+/// handle (in-kernel background threads: softirqs, workqueues, and network
+/// server kthreads like ksmbd's). It is a sibling of the shim's per-TID logs.
+const REMOTE_LOG: &str = "remote_coverage.log";
+
 #[repr(C)]
 struct KcovRemoteArg {
     trace_mode: u32,
@@ -25,6 +30,42 @@ struct KcovRemoteArg {
 
 fn kcov_handle(subsys: u64, inst: u64) -> u64 {
     subsys | (inst & 0xffff_ffff)
+}
+
+/// Let the caller pin the KCOV remote *common handle* instead of the default
+/// per-pid value.
+///
+/// The default (`kcov_handle(0, getpid())`) works when the kernel code whose
+/// coverage we want runs in a task that inherited the collector's kcov handle
+/// across fork (the syzkaller model). It does *not* work for an in-kernel
+/// network server: the threads servicing a connection have no process
+/// relationship to the collector, so the server instead routes their coverage
+/// to a fixed, well-known common handle that both sides agree on out of band.
+///
+/// ksmbd's TCP transport is exactly this case. It derives the handle from the
+/// local IPv4 address the client connected to:
+///
+///     KSMBD_KCOV_IP_HANDLE = 0x4b440000 | (ntohl(local_addr) & 0xffff)
+///
+/// (see fs/smb/server/connection.h and transport_tcp.c). A client dialing
+/// 127.0.0.1 makes every ksmbd receive-loop / command-kworker thread call
+/// kcov_remote_start_common(0x4b440001). To collect that server-side coverage
+/// the fuzzer must KCOV_REMOTE_ENABLE the *same* handle, which this override
+/// supplies. Accepts hex ("0x4b440001") or decimal.
+fn common_handle_override() -> Option<u64> {
+    let raw = std::env::var("VOCK_KCOV_COMMON_HANDLE").ok()?;
+    let v = raw.trim();
+    let parsed = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => v.parse::<u64>(),
+    };
+    match parsed {
+        Ok(h) if h != 0 => Some(h),
+        _ => {
+            eprintln!("kcov: ignoring invalid VOCK_KCOV_COMMON_HANDLE={v:?} (want nonzero hex/decimal)");
+            None
+        }
+    }
 }
 
 struct RemoteKcov {
@@ -57,17 +98,19 @@ unsafe fn remote_enable() -> Option<RemoteKcov> {
         perror("kcov: remote mmap failed");
         return None;
     }
+    let common_handle =
+        common_handle_override().unwrap_or_else(|| kcov_handle(0, libc::getpid() as u64));
     let arg = KcovRemoteArg {
         trace_mode: KCOV_TRACE_PC,
         area_size: COVER_SZ as u32,
         num_handles: 0,
-        common_handle: kcov_handle(0, libc::getpid() as u64),
+        common_handle,
     };
     if libc::ioctl(fd, KCOV_REMOTE_ENABLE, &arg as *const _) != 0 {
         perror("kcov: remote enable failed");
         return None;
     }
-    eprintln!("kcov: remote coverage enabled");
+    eprintln!("kcov: remote coverage enabled (common_handle=0x{common_handle:x})");
     Some(RemoteKcov {
         fd,
         area: area as *mut libc::c_ulong,
@@ -75,7 +118,7 @@ unsafe fn remote_enable() -> Option<RemoteKcov> {
 }
 
 unsafe fn write_remote_log(area: *mut libc::c_ulong) {
-    let Ok(f) = std::fs::File::create("remote_coverage.log") else {
+    let Ok(f) = std::fs::File::create(REMOTE_LOG) else {
         perror("kcov: fopen remote_coverage.log failed");
         return;
     };
@@ -191,6 +234,24 @@ pub fn run(
         libc::close(remote.fd);
     }
 
+    // The shim is the only thing that collects the target's coverage, and it
+    // is loaded by LD_PRELOAD, so it is silently absent for a statically
+    // linked target, for a setuid/setgid one (the loader drops LD_PRELOAD for
+    // secure-execution binaries) and for anything that resets its own
+    // environment before exec'ing the real work. Without this the only
+    // symptom is an empty report. The parent's own KCOV setup above already
+    // succeeded, so kcov itself is available and the shim is the suspect.
+    if tid_logs().is_empty() {
+        eprintln!(
+            "\x1b[93m[vock] warning: the target produced no per-task coverage logs.\n\
+             \x1b[93m        The LD_PRELOAD shim never ran. Usual causes: the target is\n\
+             \x1b[93m        statically linked, is setuid/setgid, or clears LD_PRELOAD\n\
+             \x1b[93m        before exec. Tasks created by a raw clone() syscall are also\n\
+             \x1b[93m        never instrumented; see --mode hw for a collector that does\n\
+             \x1b[93m        not need the target's cooperation.\x1b[0m"
+        );
+    }
+
     if ordered {
         // coverage-<TID>.html for each per-TID local log.
         if let Ok(rd) = std::fs::read_dir(".") {
@@ -227,13 +288,26 @@ pub fn run(
         // merge here regardless.
         let parts = if btf {
             merge_tid_logs();
+            append_parent_remote_log();
             report::timing::mark("kcov: per-TID logs merged");
             Vec::new()
         } else {
-            tid_logs()
+            let mut parts: Vec<String> = tid_logs()
                 .iter()
                 .map(|p| p.to_string_lossy().into_owned())
-                .collect()
+                .collect();
+            // The per-TID logs above come from the preload shim and only cover
+            // the target's own threads. In-kernel background threads route
+            // their coverage to the parent's KCOV_REMOTE_ENABLE common handle
+            // instead -- for a network server like ksmbd, the connection
+            // kthreads whose handle we pinned via VOCK_KCOV_COMMON_HANDLE. That
+            // lands in remote_coverage.log, a sibling of the per-TID logs, not
+            // one of them, so it must be added explicitly or the report omits
+            // all of that server-side coverage.
+            if parent_remote_log_nonempty() {
+                parts.push(REMOTE_LOG.to_string());
+            }
+            parts
         };
         eprintln!("[vock] generating report");
         let opts = report::Options {
@@ -256,6 +330,35 @@ pub fn run(
         libc::WEXITSTATUS(status)
     } else {
         1
+    }
+}
+
+/// True if the parent's remote coverage log exists with at least one PC.
+fn parent_remote_log_nonempty() -> bool {
+    std::fs::metadata(REMOTE_LOG)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
+}
+
+/// Append the parent's remote coverage onto `kerncov.log`. Used on the --btf
+/// path, where the report consumes the merged file rather than per-part inputs,
+/// so without this the server-side (remote) coverage would be dropped there too.
+fn append_parent_remote_log() {
+    if !parent_remote_log_nonempty() {
+        return;
+    }
+    let Ok(data) = std::fs::read(REMOTE_LOG) else {
+        return;
+    };
+    if let Ok(mut dst) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("kerncov.log")
+    {
+        let _ = dst.write_all(&data);
+        if !data.is_empty() && !data.ends_with(b"\n") {
+            let _ = dst.write_all(b"\n");
+        }
     }
 }
 
