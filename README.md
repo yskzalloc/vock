@@ -1,6 +1,14 @@
 # vock
 
-![vock](https://github.com/user-attachments/assets/69531851-8776-42ed-82f9-dac937f089de)
+<!-- ![vock](https://github.com/user-attachments/assets/69531851-8776-42ed-82f9-dac937f089de) -->
+
+## Hardware mode demo on generic Debian Kernel
+
+<img width="800" height="469" alt="ezgif-67d38b64f0c20c88" src="https://github.com/user-attachments/assets/fa0b2cd1-ac50-499d-a03d-2c60715cd2db" />
+
+## KCOV mode demo on [virtme-ng](https://github.com/arighi/virtme-ng) with KCOV enabled upstream Kernel
+
+<img width="800" height="469" alt="ezgif-69b8835495415b54" src="https://github.com/user-attachments/assets/4fe0cf30-0e02-40ee-b5ab-ed064608b70f" />
 
 Map any userspace program to the exact kernel code it exercises.
 
