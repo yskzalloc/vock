@@ -12,6 +12,10 @@
 
 Map any userspace program to the exact kernel code it exercises.
 
+## Presentation
+
+1. [Linux security summit EU 26](https://lsseu2026.sched.com/event/2QmUR/vock-mapping-kernel-attack-surface-with-zero-configuration-coverage-yunseong-kim-ericsson-software-technology) [slide](https://hosted-files.sched.co/lsseu2026/de/lss_eu26_vock-v2.pdf?_gl=1*rr6qs5*_gcl_au*MTk1NDg0MTk3LjE3ODc3NjczMTIuMTc1OTM5MTE1Mi4xNzg3NzY5OTY1LjE3ODc3Njk5ODYuMTk1Mzg1MjE3OC4xNzg3NzY5OTY1LjE3ODc3Njk5ODY.*FPAU*MTk1NDg0MTk3LjE3ODc3NjczMTI.)
+3. [Mini-DebConf UK, Cambridge 26](https://wiki.debian.org/DebianEvents/gb/2026/MiniDebConfCambridge/Kim1?pow_referer=) [slide](https://github.com/user-attachments/files/34545796/Mini-debconf-26-Cambridge-UK-vock.pdf)
 ```bash
 sudo ./vock.bin --vmlinux vmlinux /bin/ip addr show
 # → kerncov.log + coverage.html
