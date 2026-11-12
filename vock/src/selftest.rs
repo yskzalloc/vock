@@ -423,6 +423,13 @@ impl Harness {
         // here; the git-reset branch of vng's --force needs --commit, which we
         // never pass.
         let mut cmd = vec!["vng".to_string(), "--force".to_string()];
+        // The test kernels only have to boot and be traced, so keep newer
+        // toolchains' new diagnostics from failing the build: with
+        // CONFIG_WERROR=y, resolve_btfids runs with --fatal_warnings and a
+        // newer pahole (1.31, Ubuntu 26.04) that leaves a few __bpf_trace_*
+        // functions out of BTF turns "unresolved symbol" into a link error.
+        cmd.push("--configitem".into());
+        cmd.push("CONFIG_WERROR=n".into());
         for (k, en) in configs {
             cmd.push("--configitem".into());
             cmd.push(format!("{k}={}", if *en { "y" } else { "n" }));

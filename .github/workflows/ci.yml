@@ -15,9 +15,9 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-26.04
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
 
     steps:
     - uses: actions/checkout@v4
@@ -31,6 +31,14 @@ jobs:
             sudo udevadm trigger --name-match=kvm
         fi
 
+    # Before "Install dependencies": virtme-ng is built from source there and
+    # needs cargo to build its Rust init (see below).
+    - name: Install rust
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # Each step is a fresh shell that does not source ~/.cargo/env.
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
     - name: Install dependencies
       run: |
         sudo apt-get update
@@ -40,11 +48,34 @@ jobs:
                              libssl-dev kmod libncurses-dev git \
                              python3-pip python3-venv qemu-system curl
 
+        # selftest builds kernels with LLVM=-<major of `clang`>, which needs
+        # the matching ld.lld and llvm-{ar,nm,objcopy,...}. Install the pair
+        # for the default clang explicitly instead of relying on what the
+        # runner image happens to preinstall (a bare 26.04 has neither, and
+        # the build then dies on -fuse-ld=lld).
+        LLVM_MAJOR=$(clang --version | sed -n 's/.*clang version \([0-9]*\).*/\1/p' | head -1)
+        sudo apt-get install -y "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR"
+
+        # Ubuntu 26.04 ships uutils (Rust coreutils) as /usr/bin/env & co.,
+        # whose multi-call binary refuses to run under another argv[0]
+        # ("Security violation: Requested utility `env` does not match
+        # executable name"). virtme-ng's shell init (virtme-init) trips over
+        # it and the guest panics with "Attempted to kill init!", failing
+        # every vng test. Build and bundle the Rust virtme-ng-init instead,
+        # which vng then prefers; a plain `pip install` does not build it.
         python3 -m venv venv-virtme
         source venv-virtme/bin/activate
-        pip3 install git+https://github.com/arighi/virtme-ng.git
+        BUILD_VIRTME_NG_INIT=1 pip3 install git+https://github.com/arighi/virtme-ng.git
+        INIT=$(python3 -c 'import virtme.guest, os; print(os.path.join(os.path.dirname(virtme.guest.__file__), "bin", "virtme-ng-init"))')
+        if [ ! -x "$INIT" ]; then
+            echo "::error::virtme-ng-init was not built ($INIT); guests would fall back to the shell init, which panics on uutils coreutils"
+            exit 1
+        fi
+        file "$INIT" || true
 
         echo "#### INFO ####"
+        . /etc/os-release && echo "$PRETTY_NAME"
+        echo "env: $(readlink -f /usr/bin/env)"
         clang --version | head -1
         uname -m
         if [ -w /dev/kvm ]; then
@@ -57,17 +88,14 @@ jobs:
         git clone -b staging-testing --depth 1 \
           https://kernel.googlesource.com/pub/scm/linux/kernel/git/gregkh/staging
 
-    - name: Install rust
+    - name: Install kernel Rust toolchain
       run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        # Each step is a fresh shell that does not source ~/.cargo/env.
-        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         # Kernel Rust toolchain for selftest 5 (Rust-for-Linux coverage):
         # the kernel needs the core library source and the bindings
         # generator on top of rustc. selftest 5 gates on `make
         # rustavailable` and SKIPs cleanly if any of this is missing.
-        "$HOME/.cargo/bin/rustup" component add rust-src
-        "$HOME/.cargo/bin/cargo" install bindgen-cli
+        rustup component add rust-src
+        cargo install bindgen-cli
 
     - name: Toolchain info
       run: |
@@ -296,7 +324,7 @@ jobs:
   hw-baremetal:
     name: hw-baremetal (x86_64, running kernel)
     if: vars.HW_BAREMETAL_RUNNER != ''
-    runs-on: ${{ vars.HW_BAREMETAL_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ vars.HW_BAREMETAL_RUNNER || 'ubuntu-26.04' }}
     timeout-minutes: 45
 
     steps:
