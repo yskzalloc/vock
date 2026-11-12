@@ -25,7 +25,6 @@ mod pseudo_syscalls;
 mod dwarf;
 mod report;
 mod selftest;
-mod sud;
 mod syscall;
 mod syzlang;
 mod util;
@@ -519,7 +518,7 @@ fn real_main() -> i32 {
     // SUD runs BEFORE coverage (LD_PRELOAD, same process); ptrace/eBPF fork
     // their own target and run AFTER coverage.
     if syscall_on && syscall_backend == "sud" {
-        if !sud::available() {
+        if !syscall::sud::available() {
             // The live prctl probe failed: the kernel lacks
             // SYSCALL_USER_DISPATCH (needs >= 5.11 and, per arch, generic
             // syscall entry: SUD is built by CONFIG_GENERIC_SYSCALL, which
@@ -528,7 +527,7 @@ fn real_main() -> i32 {
             eprintln!("error: SUD (SYSCALL_USER_DISPATCH) not supported by this kernel/arch");
             return 1;
         }
-        sud::run(cmd, "trace.log");
+        syscall::sud::run(cmd, "trace.log");
         if syzlang_on {
             util::copy_file("trace.log", "trace.syz");
             eprintln!("[vock] syzlang output written to trace.syz");

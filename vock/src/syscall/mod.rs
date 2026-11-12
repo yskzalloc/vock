@@ -1,8 +1,10 @@
 //! Syscall model shared across backends: the `Syscall` record, arch name
-//! tables, strace-format decoding, and the ptrace tracer.
+//! tables, strace-format decoding, the ptrace tracer and the Syscall User
+//! Dispatch (SUD) tracer.
 
 pub mod decode;
 pub mod ptrace;
+pub mod sud;
 pub mod tables;
 
 pub use tables::{syscall_name, MAX_SYSCALL_NR};
