@@ -475,7 +475,7 @@ fn real_main() -> i32 {
                 // CPU-wide) Intel PT / LBR trace of the target is permitted
                 // unprivileged. Only bail early when kernel profiling is
                 // definitely disallowed; otherwise let perf_event_open be the
-                // authority (engine.rs reports the real error on EACCES/EPERM).
+                // authority (the hw backends report the real error on EACCES/EPERM).
                 if paranoid > 1 {
                     eprintln!(
                         "error: hw mode requires privileges\n  either: run as root: vock --mode hw {}\n  or:     echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid",

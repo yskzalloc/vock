@@ -28,6 +28,7 @@ local-*.log
 remote-*.log
 remote_coverage.log
 hw_trace.bin
+hw_trace.cpu*.bin
 
 # ─── test data ───────────────────────────────────────────────────────
 secure_block*

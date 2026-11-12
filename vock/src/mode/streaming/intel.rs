@@ -1,457 +1,49 @@
-//! Hardware-trace engine backend.
+//! Intel PT `--mode hw` backend (x86_64).
 //!
-//! Faithful Rust port of the C hardware-trace coverage backend:
-//!   - mode/hw.c         (dispatcher: prefer Intel PT, else AMD LBR)
-//!   - mode/intel_pt.c   (perf_event_open with Intel PT PMU, AUX ring mmap)
-//!   - mode/pt_decode.c  (Intel PT packet decode: PSB/TNT/TIP/FUP → kernel PCs)
-//!   - mode/amd_lbr.c    (AMD LBR sampling: branch records → kernel PCs)
+//! Port of mode/intel_pt.c (perf_event_open with the Intel PT PMU, AUX ring
+//! mmap) and mode/pt_decode.c (packet decode: PSB/TNT/TIP/FUP → kernel PCs).
 //!
-//! Public interface (kept stable; mode/hw.rs depends on it):
-//!   - `available() -> bool`
-//!   - `Session::start(pid) -> Option<Session>`
-//!   - `Session::stop(&mut self)`
-//!   - `Session::decode(&mut self, vmlinux: Option<&str>)`
-//!
-//! Task following: every event is opened once per online CPU with
-//! `attr.inherit = 1` on the target pid, so the kernel clones it into every
-//! task the target later forks, vforks or spawns as a thread (exec keeps it),
-//! and the clones write into the parent event's ring/AUX buffer on that CPU
-//! (kernel/events/ring_buffer.c). This needs no help from inside the target,
-//! unlike KCOV's per-thread handles (kcov-preload). Per-CPU events are
-//! required: the kernel refuses to mmap an inherited `cpu == -1` event
-//! (perf_mmap: "Don't allow mmap() of inherited per-task counters"). When
-//! per-CPU events cannot be opened at all the session falls back to the old
-//! single-task `cpu == -1` event and says so.
-//!
-//! Only `std` and `libc` are used. `perf_event_attr`, `perf_event_mmap_page`,
-//! the PERF_* constants and PERF_EVENT_IOC_* ioctls are not exposed by
-//! libc 0.2, so they are defined locally below.
+//! One kernel-only PT event per CPU, inherited by every task the target
+//! creates (see mode::perf). Each CPU's AUX area is an independent PT stream
+//! that interleaves every traced task scheduled on that CPU; tracing is
+//! kernel-only and the kernel text is common to all tasks, so one decoder
+//! walks it. TSC packets cut each stream into timestamped pieces, merged
+//! across CPUs by streaming::merge_streams.
 
-use std::io::Write;
-use std::ptr;
+use super::{clear_raw_traces, merge_streams, save_raw_trace, write_kerncov, Stream};
+use crate::mode::perf::{coverage_scope, open_rings, pmu_config_bit, pmu_exists, pmu_type};
+use crate::mode::perf::{PerfEventAttr, Ring};
 
-// ─── perf constants (not in libc 0.2) ────────────────────────────────────────
+const PMU: &str = "intel_pt";
 
-// ioctl requests: PERF_EVENT_IOC_ENABLE = _IO('$', 0), DISABLE = _IO('$', 1).
-// _IO(type,nr) with dir=NONE(0), size=0 → (type << 8) | nr, '$' == 0x24.
-const PERF_EVENT_IOC_ENABLE: libc::c_ulong = 0x2400;
-const PERF_EVENT_IOC_DISABLE: libc::c_ulong = 0x2401;
-
-const PERF_TYPE_HARDWARE: u32 = 0;
-const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
-
-const PERF_SAMPLE_IP: u64 = 1 << 0;
-const PERF_SAMPLE_TIME: u64 = 1 << 2;
-const PERF_SAMPLE_BRANCH_STACK: u64 = 1 << 11;
-
-const PERF_SAMPLE_BRANCH_KERNEL: u64 = 1 << 1;
-const PERF_SAMPLE_BRANCH_ANY: u64 = 1 << 3;
-
-const PERF_RECORD_SAMPLE: u32 = 9;
-
-// perf_event_attr bitfield flags (within the single `flags` u64 word).
-const ATTR_DISABLED: u64 = 1 << 0;
-const ATTR_INHERIT: u64 = 1 << 1; // follow tasks forked/cloned after open
-const ATTR_EXCLUDE_USER: u64 = 1 << 4;
-const ATTR_FREQ: u64 = 1 << 10; // sample_period_or_freq is a frequency (Hz)
-// exclude_kernel would be `1 << 5`, kept 0 to trace the kernel.
-
-// Byte offsets into perf_event_mmap_page (stable kernel ABI; the control
-// fields live at fixed offset 1024).
-const OFF_DATA_HEAD: usize = 1024;
-const OFF_DATA_TAIL: usize = 1032;
-const OFF_AUX_HEAD: usize = 1056;
-const OFF_AUX_OFFSET: usize = 1072;
-const OFF_AUX_SIZE: usize = 1080;
-
-const AUX_SIZE: usize = 4 * 1024 * 1024; // intel_pt.c: AUX_SIZE (4 MiB) per CPU
-/// Smallest per-CPU AUX area tried when the locked-memory budget
-/// (perf_event_mlock_kb x CPUs + RLIMIT_MEMLOCK) cannot fit `AUX_SIZE` on
-/// every CPU. Only unprivileged runs with perf_event_paranoid >= 0 hit it.
-const AUX_SIZE_MIN: usize = 64 * 1024;
-const INTEL_MMAP_PAGES: usize = 1; // intel_pt.c: MMAP_PAGES
-const AMD_MMAP_PAGES: usize = 128; // amd_lbr.c: MMAP_PAGES (larger ring)
-const AMD_MMAP_PAGES_MIN: usize = 8;
-const PAGE_SIZE: usize = 4096;
-
-/// perf_event_attr, matches the kernel ABI (PERF_ATTR_SIZE_VER8, 136 bytes).
-/// C bitfields (`disabled`, `exclude_user`, …) are collapsed into `flags`.
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct PerfEventAttr {
-    type_: u32,
-    size: u32,
-    config: u64,
-    sample_period_or_freq: u64,
-    sample_type: u64,
-    read_format: u64,
-    flags: u64,
-    wakeup: u32, // wakeup_events / wakeup_watermark
-    bp_type: u32,
-    config1: u64, // bp_addr / kprobe_func / config1
-    config2: u64, // bp_len / kprobe_addr / config2
-    branch_sample_type: u64,
-    sample_regs_user: u64,
-    sample_stack_user: u32,
-    clockid: i32,
-    sample_regs_intr: u64,
-    aux_watermark: u32,
-    sample_max_stack: u16,
-    reserved_2: u16,
-    aux_sample_size: u32,
-    reserved_3: u32,
-    sig_data: u64,
-    config3: u64,
+/// Whether the Intel PT PMU is registered (bare metal; KVM guests lack it).
+pub fn available() -> bool {
+    pmu_exists(PMU)
 }
 
-// ─── raw mmap-page field access ──────────────────────────────────────────────
-
-#[inline]
-unsafe fn read_u64(base: *const libc::c_void, off: usize) -> u64 {
-    ((base as *const u8).add(off) as *const u64).read_volatile()
-}
-
-#[inline]
-unsafe fn write_u64(base: *mut libc::c_void, off: usize, val: u64) {
-    ((base as *mut u8).add(off) as *mut u64).write_volatile(val);
-}
-
-// ─── availability probes (port of *_available) ───────────────────────────────
-
-fn intel_pt_available() -> bool {
-    std::path::Path::new("/sys/bus/event_source/devices/intel_pt").exists()
-        || std::path::Path::new("/sys/bus/event_source/devices/cs_etm").exists()
-}
-
-fn amd_lbr_available() -> bool {
-    match std::fs::read_to_string("/proc/cpuinfo") {
-        Ok(s) => s.contains("AuthenticAMD"),
-        Err(_) => false,
-    }
-}
-
-/// Whether any supported HW-trace PMU is present (port of
-// ─── perf_event_open helper ──────────────────────────────────────────────────
-
-unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t, cpu: i32) -> i32 {
-    // perf_event_open(attr, pid, cpu, group_fd=-1, flags=0)
-    libc::syscall(
-        libc::SYS_perf_event_open,
-        attr as *const PerfEventAttr,
-        pid,
-        cpu,
-        -1i32,
-        0u64,
-    ) as i32
-}
-
-/// Dynamic PMU type from sysfs (e.g. ibs_op), None when the PMU is absent,
-/// notably inside KVM guests, which virtualize neither IBS nor branch stacks.
-fn pmu_type(name: &str) -> Option<u32> {
-    let s = std::fs::read_to_string(format!("/sys/bus/event_source/devices/{name}/type")).ok()?;
-    parse_leading_int(&s).map(|v| v as u32)
-}
-
-/// Single-bit `attr.config` field of a PMU, from its sysfs format directory
-/// (e.g. intel_pt `tsc` is "config:10"). None when absent or multi-bit.
-fn pmu_config_bit(pmu: &str, field: &str) -> Option<u32> {
-    let s =
-        std::fs::read_to_string(format!("/sys/bus/event_source/devices/{pmu}/format/{field}"))
-            .ok()?;
-    let bit = s.trim().strip_prefix("config:")?;
-    bit.parse::<u32>().ok().filter(|b| *b < 64)
-}
-
-/// Parse a sysfs CPU list ("0-3,5,7-8").
-fn parse_cpu_list(s: &str) -> Option<Vec<i32>> {
-    let mut v = Vec::new();
-    for part in s.trim().split(',').map(str::trim).filter(|p| !p.is_empty()) {
-        match part.split_once('-') {
-            Some((a, b)) => {
-                let (a, b) = (a.parse::<i32>().ok()?, b.parse::<i32>().ok()?);
-                if b < a {
-                    return None;
-                }
-                v.extend(a..=b);
-            }
-            None => v.push(part.parse().ok()?),
-        }
-    }
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
-    }
-}
-
-/// Online CPU ids; falls back to 0..nproc when sysfs is unreadable.
-fn online_cpus() -> Vec<i32> {
-    std::fs::read_to_string("/sys/devices/system/cpu/online")
-        .ok()
-        .and_then(|s| parse_cpu_list(&s))
-        .unwrap_or_else(|| {
-            let n = unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) }.max(1);
-            (0..n as i32).collect()
-        })
-}
-
-// ─── per-CPU perf buffers ────────────────────────────────────────────────────
-
-/// One opened perf event and its mmaps: the sample/control ring and, for
-/// Intel PT, the AUX trace area. Unmapped and closed on Drop.
-struct Ring {
-    /// CPU the event is bound to; -1 for the single-task fallback.
-    cpu: i32,
-    fd: i32,
-    base: *mut libc::c_void,
-    size: usize,
-    aux: *mut libc::c_void,
-    aux_size: usize,
-}
-
-impl Ring {
-    fn new(fd: i32, cpu: i32) -> Ring {
-        Ring {
-            cpu,
-            fd,
-            base: libc::MAP_FAILED,
-            size: 0,
-            aux: libc::MAP_FAILED,
-            aux_size: 0,
-        }
-    }
-
-    fn mmap(fd: i32, len: usize, prot: i32, off: usize) -> Option<*mut libc::c_void> {
-        let p = unsafe {
-            libc::mmap(ptr::null_mut(), len, prot, libc::MAP_SHARED, fd, off as libc::off_t)
-        };
-        (p != libc::MAP_FAILED).then_some(p)
-    }
-
-    /// Sample ring of up to `data_pages` data pages (power of two). Shrinks
-    /// when the locked-memory budget is exhausted, so every CPU gets a ring.
-    fn sample(fd: i32, cpu: i32, data_pages: usize) -> Option<Ring> {
-        let mut r = Ring::new(fd, cpu);
-        let mut pages = data_pages;
-        loop {
-            let size = (pages + 1) * PAGE_SIZE;
-            if let Some(b) = Self::mmap(fd, size, libc::PROT_READ | libc::PROT_WRITE, 0) {
-                r.base = b;
-                r.size = size;
-                return Some(r);
-            }
-            let err = std::io::Error::last_os_error();
-            if pages <= AMD_MMAP_PAGES_MIN || err.raw_os_error() != Some(libc::EPERM) {
-                eprintln!("amd hw: mmap (cpu {cpu}): {err}");
-                return None;
-            }
-            pages /= 2;
-        }
-    }
-
-    /// Intel PT: control page + one data page, then the AUX area. The AUX
-    /// size halves down to `AUX_SIZE_MIN` on EPERM/ENOMEM (mlock budget).
-    fn pt(fd: i32, cpu: i32) -> Option<Ring> {
-        let mut r = Ring::new(fd, cpu);
-        let size = (INTEL_MMAP_PAGES + 1) * PAGE_SIZE;
-        match Self::mmap(fd, size, libc::PROT_READ | libc::PROT_WRITE, 0) {
-            Some(b) => {
-                r.base = b;
-                r.size = size;
-            }
-            None => {
-                eprintln!("intel_pt: mmap ring (cpu {cpu}): {}", std::io::Error::last_os_error());
-                return None;
-            }
-        }
-        let mut aux_size = AUX_SIZE;
-        loop {
-            // Program the AUX area in the mmap header, then map it.
-            unsafe {
-                write_u64(r.base, OFF_AUX_OFFSET, size as u64);
-                write_u64(r.base, OFF_AUX_SIZE, aux_size as u64);
-            }
-            if let Some(a) = Self::mmap(fd, aux_size, libc::PROT_READ, size) {
-                r.aux = a;
-                r.aux_size = aux_size;
-                if aux_size < AUX_SIZE {
-                    eprintln!(
-                        "intel_pt: cpu {cpu}: AUX area reduced to {} KiB (locked-memory limit)",
-                        aux_size / 1024
-                    );
-                }
-                return Some(r);
-            }
-            let err = std::io::Error::last_os_error();
-            let budget = matches!(err.raw_os_error(), Some(libc::EPERM) | Some(libc::ENOMEM));
-            if !budget || aux_size <= AUX_SIZE_MIN {
-                eprintln!("intel_pt: aux mmap (cpu {cpu}): {err}");
-                return None;
-            }
-            aux_size /= 2;
-        }
-    }
-
-    /// Bytes of trace the kernel committed to the AUX area.
-    fn aux_data(&self) -> &[u8] {
-        if self.aux == libc::MAP_FAILED || self.base == libc::MAP_FAILED {
-            return &[];
-        }
-        let len = (unsafe { read_u64(self.base, OFF_AUX_HEAD) } as usize).min(self.aux_size);
-        unsafe { std::slice::from_raw_parts(self.aux as *const u8, len) }
-    }
-
-    fn ioctl(&self, req: libc::c_ulong) {
-        if self.fd >= 0 {
-            unsafe { libc::ioctl(self.fd, req, 0) };
-        }
-    }
-}
-
-impl Drop for Ring {
-    fn drop(&mut self) {
-        unsafe {
-            if self.aux != libc::MAP_FAILED {
-                libc::munmap(self.aux, self.aux_size);
-            }
-            if self.base != libc::MAP_FAILED {
-                libc::munmap(self.base, self.size);
-            }
-            if self.fd >= 0 {
-                libc::close(self.fd);
-            }
-        }
-    }
-}
-
-/// Open `attr` on every online CPU with `inherit` set, following `pid` and
-/// every task it forks or clones afterwards. `map` mmaps each event (and
-/// owns/closes the fd on failure).
-///
-/// If no per-CPU event can be opened and mapped, falls back to the legacy
-/// single `cpu == -1` event without `inherit`: that one traces only the
-/// initial task, so the fallback is announced under `label`. Err carries the
-/// first per-CPU error when both fail; nothing is printed then, so callers
-/// with their own fallback (AMD LBR -> IP sampling) stay quiet.
-fn open_rings(
-    label: &str,
-    attr: &PerfEventAttr,
-    pid: libc::pid_t,
-    map: impl Fn(i32, i32) -> Option<Ring>,
-) -> Result<Vec<Ring>, std::io::Error> {
-    let cpus = online_cpus();
-    let mut inherited = *attr;
-    inherited.flags |= ATTR_INHERIT;
-    let mut rings = Vec::with_capacity(cpus.len());
-    let mut first_err: Option<std::io::Error> = None;
-    for &cpu in &cpus {
-        let fd = unsafe { perf_event_open(&inherited, pid, cpu) };
-        if fd < 0 {
-            first_err.get_or_insert_with(std::io::Error::last_os_error);
-            continue;
-        }
-        if let Some(r) = map(fd, cpu) {
-            rings.push(r);
-        }
-    }
-    if !rings.is_empty() {
-        if rings.len() < cpus.len() {
-            eprintln!(
-                "{label}: only {}/{} CPUs armed{}; tasks running on the others are not traced",
-                rings.len(),
-                cpus.len(),
-                first_err.map(|e| format!(" ({e})")).unwrap_or_default()
-            );
-        }
-        return Ok(rings);
-    }
-
-    let fd = unsafe { perf_event_open(attr, pid, -1) };
-    if fd < 0 {
-        return Err(first_err.unwrap_or_else(std::io::Error::last_os_error));
-    }
-    let r = map(fd, -1).ok_or_else(|| {
-        first_err.take().unwrap_or_else(|| std::io::Error::other("mmap failed"))
-    })?;
-    eprintln!(
-        "{label}: per-CPU inherited events unavailable ({}); tracing the initial task only, \
-forked children and new threads are not covered",
-        first_err.map(|e| e.to_string()).unwrap_or_else(|| "mmap failed".into())
-    );
-    Ok(vec![r])
-}
-
-/// Human summary of what a set of rings follows.
-fn coverage_scope(rings: &[Ring]) -> String {
-    match rings {
-        [r] if r.cpu < 0 => "initial task only".to_string(),
-        _ => format!("target + descendants, {} CPU(s)", rings.len()),
-    }
-}
-
-// ─── Session ─────────────────────────────────────────────────────────────────
-
-/// An armed hardware-trace session over a target pid and its descendants
-/// (owns every per-CPU perf event and mmap; frees them on Drop, equivalent
-/// to vock_hw_trace_fini).
-pub struct Session {
-    /// Intel PT: one AUX-carrying event per CPU. AMD: the LBR (or IP
-    /// fallback) sample event per CPU.
+/// An armed Intel PT session: one AUX-carrying event per CPU.
+pub struct IntelPt {
     rings: Vec<Ring>,
-    amd_lbr: bool,
-    // Second concurrent AMD event: IBS op precise sampling running alongside
-    // the LBR event. Both rings are decoded and merged - IBS contributes
-    // skid-0 retired-op rips, LBR contributes 16-branch breadth per PMI.
-    ibs: Vec<Ring>,
 }
 
-impl Session {
-    pub fn start(pid: libc::pid_t) -> Option<Session> {
-        if intel_pt_available() {
-            if let Some(s) = Self::intel_pt_start(pid) {
-                return Some(s);
-            }
-            return None;
-        }
-        if amd_lbr_available() {
-            if let Some(s) = Self::amd_lbr_start(pid) {
-                return Some(s);
-            }
-            return None;
-        }
-        eprintln!("hw_trace: no hardware trace PMU found");
-        None
-    }
-
+impl IntelPt {
     /// Port of intel_pt_start(), one event per CPU.
-    fn intel_pt_start(pid: libc::pid_t) -> Option<Session> {
-        // Read the Intel PT (or CoreSight) PMU type from sysfs.
-        let type_str = std::fs::read_to_string("/sys/bus/event_source/devices/intel_pt/type")
-            .or_else(|_| {
-                std::fs::read_to_string("/sys/bus/event_source/devices/cs_etm/type")
-            })
-            .ok()?;
-        // atoi-style: parse the leading integer.
-        let type_ = parse_leading_int(&type_str)?;
-        if type_ < 0 {
+    pub fn start(pid: libc::pid_t) -> Option<IntelPt> {
+        let Some(type_) = pmu_type(PMU) else {
+            eprintln!("intel_pt: cannot read PMU type");
             return None;
-        }
-
-        let mut attr = PerfEventAttr {
-            size: std::mem::size_of::<PerfEventAttr>() as u32,
-            type_: type_ as u32,
-            // disabled = 1, exclude_kernel = 0, exclude_user = 1
-            flags: ATTR_DISABLED | ATTR_EXCLUDE_USER,
-            ..Default::default()
         };
+
+        // disabled = 1, exclude_kernel = 0, exclude_user = 1
+        let mut attr = PerfEventAttr::kernel_only(type_);
         // TSC packets timestamp each per-CPU stream (at every PSB+ and every
         // trace enable, i.e. each time a traced task is scheduled in), which
         // is what lets decode() merge the CPUs back into execution order.
-        if let Some(bit) = pmu_config_bit("intel_pt", "tsc") {
+        if let Some(bit) = pmu_config_bit(PMU, "tsc") {
             attr.config |= 1u64 << bit;
         }
 
-        let rings = match open_rings("intel_pt", &attr, pid, Ring::pt) {
+        let rings = match open_rings(PMU, &attr, pid, |fd, cpu| Ring::aux(fd, cpu, PMU)) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("intel_pt: perf_event_open: {e}");
@@ -459,269 +51,23 @@ impl Session {
             }
         };
         for r in &rings {
-            r.ioctl(PERF_EVENT_IOC_ENABLE);
+            r.enable();
         }
         eprintln!("[vock] intel_pt: tracing {}", coverage_scope(&rings));
-
-        Some(Session {
-            rings,
-            amd_lbr: false,
-            ibs: Vec::new(),
-        })
+        Some(IntelPt { rings })
     }
 
-    /// AMD sampling engine: two concurrent perf events, merged at decode.
-    ///
-    /// * LBR branch stacks (cycles clock, 10 kHz): 16 taken branches per
-    ///   PMI - the breadth. A tight period is degenerate here (the counter
-    ///   re-arms instantly, or unthrottles on the tick, and every snapshot
-    ///   captures the same 16-branch PMI entry window); frequency mode
-    ///   spreads snapshots across the target's real kernel work.
-    /// * IBS op (`ibs_op` PMU, 10 kHz): precise instruction-based sampling.
-    ///   The rip of IBS samples has skid 0 (arch/x86/events/amd/ibs.c), each
-    ///   sample is a retired op, and the hardware randomizes the sample
-    ///   interval, decorrelating it from the LBR PMI clock.
-    ///
-    /// Alone, IBS yields ~1 PC per sample vs LBR's ~32 (measured: 21 vs ~500
-    /// unique PCs on the same run), so it complements rather than replaces
-    /// LBR. Guests get neither (KVM virtualizes neither facility) and fall
-    /// back to plain IP sampling.
-    fn amd_lbr_start(pid: libc::pid_t) -> Option<Session> {
-        let lbr_attr = PerfEventAttr {
-            size: std::mem::size_of::<PerfEventAttr>() as u32,
-            type_: PERF_TYPE_HARDWARE,
-            config: PERF_COUNT_HW_CPU_CYCLES,
-            flags: ATTR_DISABLED | ATTR_EXCLUDE_USER | ATTR_FREQ,
-            sample_period_or_freq: 10_000, // Hz; clear of the PMI throttle
-            sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME | PERF_SAMPLE_BRANCH_STACK,
-            branch_sample_type: PERF_SAMPLE_BRANCH_KERNEL | PERF_SAMPLE_BRANCH_ANY,
-            wakeup: 1,
-            ..Default::default()
-        };
-        let map = |fd, cpu| Ring::sample(fd, cpu, AMD_MMAP_PAGES);
-
-        let rings = match open_rings("amd_lbr", &lbr_attr, pid, map) {
-            Ok(r) => r,
-            Err(e) => {
-                // Fallback: IP-only cycle sampling. Reached on kernels without
-                // LBR and notably inside KVM guests, where AMD branch stacks
-                // (BRS / LbrExtV2) are not virtualized. Statistical IP samples
-                // are sparse and biased toward interrupt/exception entry code,
-                // so say so instead of quietly producing a misleading report.
-                eprintln!(
-                    "amd_lbr: branch-stack sampling unavailable ({e}); falling back to \
-IP sampling every 4000 kernel cycles"
-                );
-                eprintln!(
-                    "amd_lbr: expect sparse, interrupt-biased coverage - KVM guests do not \
-virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for real LBR"
-                );
-                let attr = PerfEventAttr {
-                    size: std::mem::size_of::<PerfEventAttr>() as u32,
-                    type_: PERF_TYPE_HARDWARE,
-                    config: PERF_COUNT_HW_CPU_CYCLES,
-                    flags: ATTR_DISABLED | ATTR_EXCLUDE_USER,
-                    sample_period_or_freq: 4000,
-                    sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME,
-                    wakeup: 1,
-                    ..Default::default()
-                };
-                match open_rings("amd_lbr", &attr, pid, map) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        eprintln!("amd_lbr: perf_event_open (fallback): {e}");
-                        return None;
-                    }
-                }
-            }
-        };
-
-        // Secondary: IBS op, when the PMU exists (bare metal only).
-        // exclude_user is filtered in the IBS IRQ handler on recent kernels
-        // and rejected with EINVAL on older ones - retry without it; the
-        // decoder keeps only kernel addresses anyway. IBS must cover the
-        // same tasks as the primary event, or the merged log would weight
-        // some CPUs/tasks with precise samples and not others: keep it only
-        // when it armed exactly as many CPUs.
-        let mut ibs = Vec::new();
-        if let Some(t) = pmu_type("ibs_op") {
-            for flags in [
-                ATTR_DISABLED | ATTR_FREQ | ATTR_EXCLUDE_USER,
-                ATTR_DISABLED | ATTR_FREQ,
-            ] {
-                let attr = PerfEventAttr {
-                    size: std::mem::size_of::<PerfEventAttr>() as u32,
-                    type_: t,
-                    config: 0,
-                    flags,
-                    sample_period_or_freq: 10_000, // Hz
-                    sample_type: PERF_SAMPLE_IP | PERF_SAMPLE_TIME,
-                    wakeup: 1,
-                    ..Default::default()
-                };
-                if let Ok(r) = open_rings("amd ibs", &attr, pid, map) {
-                    if r.len() == rings.len() {
-                        eprintln!("amd hw: + IBS op precise sampling (skid 0, retired ops)");
-                        ibs = r;
-                    } else {
-                        eprintln!(
-                            "amd hw: IBS armed on {}/{} CPUs, not used",
-                            r.len(),
-                            rings.len()
-                        );
-                    }
-                    break;
-                }
-            }
-        }
-
-        for r in rings.iter().chain(ibs.iter()) {
-            r.ioctl(PERF_EVENT_IOC_ENABLE);
-        }
-        eprintln!("[vock] amd hw: tracing {}", coverage_scope(&rings));
-
-        Some(Session {
-            rings,
-            amd_lbr: true,
-            ibs,
-        })
-    }
-
-    /// Port of vock_hw_trace_stop(). Disabling an inherited event also
-    /// disables every child copy (perf_event_for_each_child).
+    /// Port of vock_hw_trace_stop().
     pub fn stop(&mut self) {
-        for r in self.rings.iter().chain(self.ibs.iter()) {
-            r.ioctl(PERF_EVENT_IOC_DISABLE);
+        for r in &self.rings {
+            r.disable();
         }
     }
 
-    /// Port of vock_hw_trace_decode(): dispatch to the AMD or Intel decoder,
-    /// each of which writes kerncov.log (one "0x<pc>" per line).
+    /// Port of intel_pt_decode(), per CPU: decode every CPU's AUX stream,
+    /// merge them by TSC and write kerncov.log (one "0x<pc>" per line).
     pub fn decode(&mut self, vmlinux: Option<&str>) {
-        if self.rings.is_empty() {
-            return;
-        }
-        if self.amd_lbr {
-            self.amd_lbr_decode();
-        } else {
-            self.intel_pt_decode(vmlinux);
-        }
-    }
-
-    /// Port of amd_lbr_decode().
-    fn amd_lbr_decode(&mut self) {
-        // Chronological merge: every event samples PERF_SAMPLE_TIME, so the
-        // per-CPU LBR/IP streams and the IBS streams interleave by timestamp
-        // instead of being concatenated. Within one LBR sample perf orders
-        // the branch entries newest-first; they are reversed here so the log
-        // reads oldest-to-newest. kerncov.log is therefore a true execution
-        // sequence (duplicates preserved) - the normal report dedups it,
-        // and --ordered renders it as-is.
-        let mut samples: Vec<(u64, Vec<u64>)> = Vec::new();
-        for r in self.rings.iter().chain(self.ibs.iter()) {
-            Self::drain_sample_ring(r.base, r.size, &mut samples);
-        }
-        // Stable: equal timestamps keep ring order.
-        samples.sort_by_key(|(t, _)| *t);
-
-        let mut out = String::new();
-        let mut pc_count: i32 = 0;
-        for (_, pcs) in &samples {
-            for pc in pcs {
-                out.push_str(&format!("0x{:x}\n", pc));
-                pc_count += 1;
-            }
-        }
-
-        if let Ok(mut f) = std::fs::File::create("kerncov.log") {
-            let _ = f.write_all(out.as_bytes());
-        }
-        eprintln!("[vock] AMD hw: {} kernel PCs sampled", pc_count);
-    }
-
-    /// Drain one perf sample ring into timestamped samples. Record layout
-    /// (sample_type = IP | TIME [| BRANCH_STACK]): header, ip, time, then
-    /// optionally nr + nr x {from, to, flags}. Kernel addresses only; branch
-    /// entries are reversed to oldest-first (perf returns them newest-first).
-    fn drain_sample_ring(
-        base: *mut libc::c_void,
-        mmap_size: usize,
-        samples: &mut Vec<(u64, Vec<u64>)>,
-    ) {
-        let head = unsafe { read_u64(base, OFF_DATA_HEAD) };
-        let mut tail = unsafe { read_u64(base, OFF_DATA_TAIL) };
-        let data_size = (mmap_size - 4096) as u64;
-        let ring = unsafe { (base as *const u8).add(4096) };
-
-        while tail < head {
-            let ev = unsafe { ring.add((tail % data_size) as usize) };
-            // struct perf_event_header { u32 type; u16 misc; u16 size; }
-            let ev_type = unsafe { (ev as *const u32).read_unaligned() };
-            let ev_size = unsafe { (ev.add(6) as *const u16).read_unaligned() } as u64;
-
-            if ev_type == PERF_RECORD_SAMPLE && ev_size >= 8 + 8 + 8 {
-                let mut p = unsafe { ev.add(8) };
-                let ip = unsafe { (p as *const u64).read_unaligned() };
-                p = unsafe { p.add(8) };
-                let time = unsafe { (p as *const u64).read_unaligned() };
-                p = unsafe { p.add(8) };
-
-                let mut pcs: Vec<u64> = Vec::new();
-
-                // Branch stack present when the record extends past ip+time+nr.
-                if ev_size > 8 + 8 + 8 + 8 {
-                    let nr = unsafe { (p as *const u64).read_unaligned() };
-                    p = unsafe { p.add(8) };
-                    let n = nr.min(32) as usize;
-                    let mut branches: Vec<(u64, u64)> = Vec::with_capacity(n);
-                    for _ in 0..n {
-                        let from = unsafe { (p as *const u64).read_unaligned() };
-                        let to = unsafe { (p.add(8) as *const u64).read_unaligned() };
-                        p = unsafe { p.add(24) };
-                        branches.push((from, to));
-                    }
-                    for (from, to) in branches.into_iter().rev() {
-                        if from >= 0xffff_8000_0000_0000 {
-                            pcs.push(from);
-                        }
-                        if to >= 0xffff_8000_0000_0000 {
-                            pcs.push(to);
-                        }
-                    }
-                }
-                // The sampled ip itself is the newest point in the record.
-                if ip >= 0xffff_8000_0000_0000 {
-                    pcs.push(ip);
-                }
-                if !pcs.is_empty() {
-                    samples.push((time, pcs));
-                }
-            }
-            tail += ev_size;
-        }
-
-        unsafe { write_u64(base, OFF_DATA_TAIL, head) };
-    }
-
-    /// Port of intel_pt_decode(), per CPU.
-    ///
-    /// Each CPU's AUX area is an independent PT stream (inherited events on
-    /// one CPU share the parent's buffer, so it interleaves every traced
-    /// task scheduled there; tracing is kernel-only and the kernel text is
-    /// common to all tasks, so one decoder walks it). Each stream is cut at
-    /// its TSC packets and the pieces of all CPUs are merged by TSC, which
-    /// keeps kerncov.log in execution order across migrations and threads.
-    fn intel_pt_decode(&mut self, vmlinux: Option<&str>) {
-        // Remove raw traces of a previous run so stale CPUs don't linger.
-        if let Ok(rd) = std::fs::read_dir(".") {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                if n == "hw_trace.bin" || (n.starts_with("hw_trace.cpu") && n.ends_with(".bin")) {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
+        clear_raw_traces();
 
         // Load the kernel text once for every CPU's decoder.
         let text = vmlinux.and_then(|vm| {
@@ -739,13 +85,12 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
             if data.is_empty() {
                 continue;
             }
-            // Save raw trace (one stream per file: they cannot be concatenated).
-            let (name, label) = if r.cpu < 0 {
-                ("hw_trace.bin".to_string(), "intel_pt".to_string())
+            save_raw_trace(r.cpu, data);
+            let label = if r.cpu < 0 {
+                PMU.to_string()
             } else {
-                (format!("hw_trace.cpu{}.bin", r.cpu), format!("intel_pt cpu{}", r.cpu))
+                format!("{PMU} cpu{}", r.cpu)
             };
-            let _ = std::fs::write(&name, data);
             if data.len() + r.aux_size / 64 >= r.aux_size {
                 eprintln!(
                     "[vock] {label}: AUX area full ({} KiB), later trace on this CPU may be lost",
@@ -754,7 +99,8 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
             }
 
             let s = match &text {
-                // Try full decode with vmlinux; on load failure fall back to TIP-only.
+                // Full decode with vmlinux; without it (or on load failure)
+                // fall back to TIP-only.
                 Some((t, vaddr, _)) => {
                     let mut dec = PtDecoder::new(t, *vaddr, data, label);
                     let n = dec.run();
@@ -774,11 +120,7 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
             eprintln!("[vock] intel_pt: no data captured");
             return;
         }
-        let out = merge_streams(&streams);
-
-        if let Ok(mut f) = std::fs::File::create("kerncov.log") {
-            let _ = f.write_all(out.as_bytes());
-        } else {
+        if !write_kerncov(&merge_streams(&streams)) {
             eprintln!("intel_pt: fopen kerncov.log failed");
             return;
         }
@@ -788,61 +130,6 @@ virtualize AMD branch stacks; use --mode kcov in VMs, or run on bare metal for r
             streams.len()
         );
     }
-}
-
-/// One decoded PT stream: `out` holds "0x<pc>\n" lines, `segs` the
-/// (TSC, byte offset into `out`) of every TSC packet seen.
-#[derive(Default)]
-struct Stream {
-    out: String,
-    segs: Vec<(u64, usize)>,
-    pcs: i32,
-}
-
-/// Merge per-CPU decoded streams into one chronological log. Each stream is
-/// cut at its TSC packets and the pieces are ordered by TSC. The sort is
-/// stable and TSC is monotonic within a stream, so each stream keeps its own
-/// order; streams without any TSC (timestamps unavailable) are concatenated
-/// in CPU order. Output before a stream's first TSC takes that TSC.
-fn merge_streams(streams: &[Stream]) -> String {
-    let mut pieces: Vec<(u64, &str)> = Vec::new();
-    for s in streams {
-        let mut tsc = s.segs.first().map_or(0, |seg| seg.0);
-        let mut start = 0usize;
-        for &(t, off) in &s.segs {
-            if off > start {
-                pieces.push((tsc, &s.out[start..off]));
-                start = off;
-            }
-            tsc = t;
-        }
-        if s.out.len() > start {
-            pieces.push((tsc, &s.out[start..]));
-        }
-    }
-    pieces.sort_by_key(|p| p.0);
-    let mut out = String::with_capacity(streams.iter().map(|s| s.out.len()).sum());
-    for (_, p) in pieces {
-        out.push_str(p);
-    }
-    out
-}
-
-// atoi-style leading-integer parse (permits leading whitespace / trailing junk).
-fn parse_leading_int(s: &str) -> Option<i32> {
-    let t = s.trim_start();
-    let mut end = 0;
-    let bytes = t.as_bytes();
-    if end < bytes.len() && (bytes[end] == b'+' || bytes[end] == b'-') {
-        end += 1;
-    }
-    while end < bytes.len() && bytes[end].is_ascii_digit() {
-        end += 1;
-    }
-    if end == 0 {
-        return Some(0); // atoi("") == 0
-    }
-    t[..end].parse::<i32>().ok().or(Some(0))
 }
 
 // ─── Intel PT packet layer ───────────────────────────────────────────────────

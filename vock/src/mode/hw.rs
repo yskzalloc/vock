@@ -1,19 +1,65 @@
-//! Hardware-trace coverage mode: Intel PT / AMD LBR (x86_64), CoreSight
-//! (aarch64). Port of mode/hw.c + intel_pt.c + pt_decode.c + amd_lbr.c and the
-//! run_hw_mode orchestration in vock.c.
+//! Hardware-trace coverage mode (`--mode hw`): run the target under a
+//! kernel-only hardware trace and produce kerncov.log + report. Port of
+//! mode/hw.c (backend dispatcher) and the run_hw_mode orchestration in vock.c.
 //!
-//! Public surface (kept stable across the backend port):
-//!   - `available()`, is any hardware-trace PMU usable?
-//!   - `run(...)`, trace the target and produce kerncov.log + report.
+//! The CPU-specific backends live in:
+//!   - streaming::intel  Intel PT (x86_64)
+//!   - sampling::amd     AMD LBR + IBS (x86_64)
+//!   - streaming::arm    Arm CoreSight ETM/ETE (aarch64), TODO
+//!
+//! all built on the shared per-CPU, child-following perf plumbing in
+//! mode::perf.
 
-#![allow(clippy::too_many_arguments)]
-
-#[path = "engine.rs"]
-mod engine;
-
+use super::sampling::amd::Amd;
+use super::streaming::arm::CoreSight;
+use super::streaming::intel::IntelPt;
+use super::{sampling, streaming};
 use crate::report;
 
-/// Whether any supported hardware-trace PMU is present.
+/// The armed backend. Selection order (mode/hw.c): Intel PT if its PMU
+/// exists, else AMD if the vendor matches, else CoreSight. If the preferred
+/// backend fails to start the session aborts rather than trying the next.
+enum Backend {
+    IntelPt(IntelPt),
+    Amd(Amd),
+    CoreSight(CoreSight),
+}
+
+impl Backend {
+    fn start(pid: libc::pid_t) -> Option<Backend> {
+        if streaming::intel::available() {
+            return IntelPt::start(pid).map(Backend::IntelPt);
+        }
+        if sampling::amd::available() {
+            return Amd::start(pid).map(Backend::Amd);
+        }
+        if streaming::arm::available() {
+            return CoreSight::start(pid).map(Backend::CoreSight);
+        }
+        eprintln!("hw_trace: no hardware trace PMU found");
+        None
+    }
+
+    fn stop(&mut self) {
+        match self {
+            Backend::IntelPt(b) => b.stop(),
+            Backend::Amd(b) => b.stop(),
+            Backend::CoreSight(b) => b.stop(),
+        }
+    }
+
+    /// Decode the captured trace into kerncov.log (one "0x<pc>" per line).
+    fn decode(&mut self, vmlinux: Option<&str>) {
+        match self {
+            Backend::IntelPt(b) => b.decode(vmlinux),
+            Backend::Amd(b) => b.decode(),
+            Backend::CoreSight(b) => b.decode(vmlinux),
+        }
+    }
+}
+
+/// Trace `cmd` and every task it creates, then generate the report.
+/// Returns the target's exit status.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     cmd: &[String],
@@ -56,8 +102,8 @@ pub fn run(
     }
     unsafe { libc::close(pipefd[0]) };
 
-    let mut session = match engine::Session::start(pid) {
-        Some(s) => s,
+    let mut backend = match Backend::start(pid) {
+        Some(b) => b,
         None => {
             eprintln!("hw_trace: start failed");
             unsafe {
@@ -85,15 +131,14 @@ pub fn run(
     }
     reap_descendants();
     unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
-    session.stop();
-    session.decode(vmlinux);
-    drop(session);
+    backend.stop();
+    backend.decode(vmlinux);
+    drop(backend);
 
-    // Generate report from kerncov.log. The AMD decoder emits the log in
+    // Generate report from kerncov.log. Both decoders emit the log in
     // timestamp order with duplicates preserved, so with --ordered the
-    // report renders the execution sequence as-is (Intel PT trace output is
-    // inherently ordered too); without it the normal deduplicated
-    // source-annotated report is produced.
+    // report renders the execution sequence as-is; without it the normal
+    // deduplicated source-annotated report is produced.
     let opts = report::Options {
         kernel_src: kernel_src.map(String::from),
         vmlinux: vmlinux.map(String::from),
