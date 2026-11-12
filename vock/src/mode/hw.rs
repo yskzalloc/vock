@@ -32,6 +32,13 @@ pub fn run(
         return 1;
     }
 
+    // The perf events follow every descendant of the target (inherit), so
+    // the trace must stay armed until the last of them exits, not just the
+    // direct child. As a child subreaper, descendants orphaned by an exiting
+    // parent (daemonized, double-forked) are reparented to us and can be
+    // waited for below.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) };
+
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         unsafe {
@@ -58,6 +65,7 @@ pub fn run(
                 libc::kill(pid, libc::SIGKILL);
                 let mut st = 0;
                 libc::waitpid(pid, &mut st, 0);
+                libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0);
             }
             return 1;
         }
@@ -70,7 +78,13 @@ pub fn run(
     }
 
     let mut status = 0;
-    unsafe { libc::waitpid(pid, &mut status, 0) };
+    unsafe {
+        while libc::waitpid(pid, &mut status, 0) < 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+        {}
+    }
+    reap_descendants();
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0) };
     session.stop();
     session.decode(vmlinux);
     drop(session);
@@ -99,5 +113,27 @@ pub fn run(
         libc::WEXITSTATUS(status)
     } else {
         1
+    }
+}
+
+/// Wait for every remaining child: descendants of the target reparented to
+/// us as subreaper. Their exit status does not affect ours.
+fn reap_descendants() {
+    let mut st = 0;
+    let mut announced = false;
+    loop {
+        let r = unsafe { libc::waitpid(-1, &mut st, libc::WNOHANG) };
+        if r == 0 {
+            if !announced {
+                eprintln!("[vock] target exited; waiting for its remaining descendants");
+                announced = true;
+            }
+            let r = unsafe { libc::waitpid(-1, &mut st, 0) };
+            if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                return;
+            }
+        } else if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return; // ECHILD: none left
+        }
     }
 }
