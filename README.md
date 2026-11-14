@@ -1,16 +1,19 @@
 # vock
 
+Map any userspace program to the exact kernel code it exercises.
 <!-- ![vock](https://github.com/user-attachments/assets/69531851-8776-42ed-82f9-dac937f089de) -->
 
-## Hardware mode demo on generic Debian Kernel
+## Hardware Tracing Demo: Intel PT on Debian 13 generic
 
-<img width="800" height="469" alt="ezgif-67d38b64f0c20c88" src="https://github.com/user-attachments/assets/fa0b2cd1-ac50-499d-a03d-2c60715cd2db" />
+<img width="800" height="469" alt="Hardware Tracing Demo: Intel PT on Debian 13 generic" src="https://github.com/user-attachments/assets/fa0b2cd1-ac50-499d-a03d-2c60715cd2db" />
 
-## KCOV mode demo on [virtme-ng](https://github.com/arighi/virtme-ng) with KCOV enabled upstream Kernel
+## Hardware Tracing Demo: Arm CoreSight ETMv4 on Ubuntu Jammy
 
-<img width="800" height="469" alt="ezgif-69b8835495415b54" src="https://github.com/user-attachments/assets/4fe0cf30-0e02-40ee-b5ab-ed064608b70f" />
+<img width="800" height="461" alt="Hardware Tracing Demo: Arm CoreSight ETMv4 on Ubuntu Jammy" src="https://github.com/user-attachments/assets/94f47715-f1d3-4e29-bd0f-1e3cb9f28fc6" />
 
-Map any userspace program to the exact kernel code it exercises.
+## KCOV mode Demo: [virtme-ng](https://github.com/arighi/virtme-ng) on a KCOV-Enabled Upstream Linux Kernel
+
+<img width="800" height="469" alt="KCOV mode demo on virtme-ng with KCOV enabled upstream Kernel" src="https://github.com/user-attachments/assets/4fe0cf30-0e02-40ee-b5ab-ed064608b70f" />
 
 ## Presentation
 
