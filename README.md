@@ -45,8 +45,12 @@ an architecture converted to generic syscall entry: SUD is compiled by
 `CONFIG_GENERIC_SYSCALL`, which only `CONFIG_GENERIC_ENTRY` selects, so it
 works on x86_64, s390, riscv, loongarch and powerpc, while arm64 (which
 selects `GENERIC_IRQ_ENTRY` alone) SKIPs no matter how the kernel is
-configured. CoreSight (arm64) is ported and builds; it is validated in
-follow-up work.
+configured. CoreSight ETMv4 (arm64) is implemented and validated on bare-metal
+aarch64 (for example, AMD Kria KV260 with 4x Cortex-A53 ETMv4.0): `vock`
+automatically probes `tmc_etr0` (System DRAM sink) and falls back to `tmc_etf0`
+(On-chip SRAM sink) when `tmc_etr0` does not deliver trace bytes, programs
+ETMv4 address range comparators (`PERF_EVENT_IOC_SET_FILTER`), demuxes 16-byte
+CoreSight formatter frames, and walks A64 `.text` basic blocks.
 
 `vock execprog` is a **syz-execprog-style executor**: it replays a program
 with `-repeat`/`-procs` and can attribute KCOV coverage to each call. An
@@ -86,18 +90,21 @@ make            # wraps `cargo build --release`; places ./vock.bin and mode/kcov
 
 ## Usage
 
-### 1. Hardware Mode (Intel PT / AMD LBR)
+### 1. Hardware Mode (Intel PT / AMD LBR / Arm64 CoreSight)
 
 Works on **any kernel**, no CONFIG_KCOV needed:
 
 ```bash
-# Full branch coverage (needs vmlinux for TNT decoding)
+# Full branch coverage (needs vmlinux for TNT / ETMv4 Atom decoding)
 sudo ./vock.bin --vmlinux /boot/vmlinux-$(uname -r) /bin/ip addr show
 # → kerncov.log + coverage.html
 
 # Function-entry only (no vmlinux)
 sudo ./vock.bin /bin/ip addr show
 # → kerncov.log
+
+# Arm64 CoreSight: optional sink override and ETMv4 IP range comparator filter
+sudo ./vock.bin --sink tmc_etf0 --addr-filter vfs_read --vmlinux vmlinux /bin/cat /etc/hostname
 ```
 
 If not running as root, the kernel only forbids kernel profiling at
@@ -106,6 +113,50 @@ If not running as root, the kernel only forbids kernel profiling at
 echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
 ./vock.bin --vmlinux vmlinux /bin/ip addr show
 ```
+
+#### Arm64 CoreSight `tmc_etf0` (On-Chip SRAM Sink) & `--addr-filter`
+
+On arm64 CoreSight systems, `vock` automatically probes `tmc_etr0` (System DRAM
+sink) first and falls back to `tmc_etf0` (On-chip SRAM FIFO/circular sink) when
+`tmc_etr0` does not deliver trace bytes (or when `--sink tmc_etf0` is selected).
+
+Because `tmc_etf0` is a small on-chip circular SRAM buffer (for example, 4 KiB
+on ZynqMP / Kria KV260) with no buffer-full interrupt, the kernel only drains
+`tmc_etf0` into the perf AUX ring when the perf event stops on that CPU
+(context switch or task exit). If a short-lived command runs from `open()`/`read()`
+through `exit_group()` in a single timeslice, the tens of thousands of kernel
+instructions executed during `do_exit()` (`exit_mm`, `unmap_vmas`, page-table
+teardown) wrap the 4 KiB circular SRAM (`overwrite=1`) and overwrite the
+earlier syscalls.
+
+Pass `--addr-filter <SPEC>` (or `VOCK_CS_FILTER=<SPEC>`) to program the ETMv4
+hardware address range comparators (`TRCACVR`/`TRCACATR` via
+`PERF_EVENT_IOC_SET_FILTER`, up to 4 comparator pairs) so `tmc_etf0` only
+records trace inside the target range and `do_exit()` cannot overwrite it:
+
+- **Kernel function symbol(s)** (resolved via `vmlinux` `.symtab` or `/proc/kallsyms`):
+  ```bash
+  # Trace only cpuinfo_open() in fs/proc/cpuinfo.c (96 AUX bytes, no ETF wrap)
+  ./vock.bin --mode hw --addr-filter cpuinfo_open \
+      --vmlinux ~/jammy/vmlinux --kernel-src ~/jammy cat /proc/cpuinfo
+
+  # Trace c_show() in arch/arm64/kernel/cpuinfo.c
+  ./vock.bin --mode hw --addr-filter c_show \
+      --vmlinux ~/jammy/vmlinux --kernel-src ~/jammy cat /proc/cpuinfo
+
+  # Up to 4 comma-separated kernel functions
+  ./vock.bin --mode hw --addr-filter read_zero,write_null,urandom_read_iter \
+      --vmlinux ~/jammy/vmlinux --kernel-src ~/jammy ./workload
+  ```
+- **Explicit kernel address range** (`0x<start>/0x<size>` or raw perf `filter` syntax):
+  ```bash
+  ./vock.bin --mode hw --addr-filter 0xffff8000084825c0/0x40 \
+      --vmlinux ~/jammy/vmlinux --kernel-src ~/jammy cat /proc/cpuinfo
+  ```
+- **Userspace ELF executable `PT_LOAD` (`PF_X`) segment** (`@<binary>`):
+  ```bash
+  VOCK_CS_USERSPACE=1 ./vock.bin --mode hw --addr-filter @/bin/cat /bin/cat /proc/cpuinfo
+  ```
 
 ### 2. KCOV Mode
 

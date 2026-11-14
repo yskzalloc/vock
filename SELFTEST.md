@@ -230,7 +230,11 @@ there. This is why GitHub's arm64 hosted runners (Azure Cobalt VMs on
 Neoverse N2, whose silicon does implement ETE + TRBE) always SKIP test 2:
 it is a platform limit, not a missing package. CoreSight validation needs
 bare-metal arm64 with `CONFIG_CORESIGHT=y` (plus `CONFIG_CORESIGHT_TRBE`
-for ARMv9 ETE) and firmware that describes the trace unit.
+for ARMv9 ETE) and firmware/DT that describes the trace unit and funnel/sink
+topology (validated on bare-metal aarch64, e.g., AMD Kria KV260 with 4x
+Cortex-A53 `etm0..3` -> `funnel0` -> `tmc_etf0` -> `funnel2` -> `replicator`
+-> `tmc_etr0`, where `vock selftest 2 --on host` passes 10/10 checks with 2
+expected skips for SUD and unprivileged eBPF).
 
 References:
 

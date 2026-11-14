@@ -20,10 +20,13 @@ use std::ptr;
 
 // ─── perf constants (not in libc 0.2) ────────────────────────────────────────
 
-// ioctl requests: PERF_EVENT_IOC_ENABLE = _IO('$', 0), DISABLE = _IO('$', 1).
+// ioctl requests: PERF_EVENT_IOC_ENABLE = _IO('$', 0), DISABLE = _IO('$', 1),
+// SET_FILTER = _IOW('$', 6, char *).
 // _IO(type,nr) with dir=NONE(0), size=0 → (type << 8) | nr, '$' == 0x24.
+// _IOW('$', 6, char *) on 64-bit → (1 << 30) | (8 << 16) | (0x24 << 8) | 6 = 0x40082406.
 const PERF_EVENT_IOC_ENABLE: libc::c_ulong = 0x2400;
 const PERF_EVENT_IOC_DISABLE: libc::c_ulong = 0x2401;
+pub(crate) const PERF_EVENT_IOC_SET_FILTER: libc::c_ulong = 0x4008_2406;
 
 pub(crate) const PERF_TYPE_HARDWARE: u32 = 0;
 pub(crate) const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
@@ -35,7 +38,16 @@ pub(crate) const PERF_SAMPLE_BRANCH_STACK: u64 = 1 << 11;
 pub(crate) const PERF_SAMPLE_BRANCH_KERNEL: u64 = 1 << 1;
 pub(crate) const PERF_SAMPLE_BRANCH_ANY: u64 = 1 << 3;
 
+pub(crate) const PERF_RECORD_LOST: u32 = 2;
 pub(crate) const PERF_RECORD_SAMPLE: u32 = 9;
+pub(crate) const PERF_RECORD_AUX: u32 = 11;
+pub(crate) const PERF_RECORD_AUX_OUTPUT_HW_ID: u32 = 21;
+
+pub(crate) const PERF_AUX_FLAG_TRUNCATED: u64 = 0x01;
+pub(crate) const PERF_AUX_FLAG_OVERWRITE: u64 = 0x02;
+pub(crate) const PERF_AUX_FLAG_PARTIAL: u64 = 0x04;
+pub(crate) const PERF_AUX_FLAG_COLLISION: u64 = 0x08;
+pub(crate) const PERF_AUX_FLAG_CORESIGHT_FORMAT_RAW: u64 = 0x0100;
 
 // perf_event_attr bitfield flags (within the single `flags` u64 word).
 pub(crate) const ATTR_DISABLED: u64 = 1 << 0;
@@ -123,7 +135,7 @@ pub(crate) unsafe fn write_u64(base: *mut libc::c_void, off: usize, val: u64) {
 
 // ─── perf_event_open / sysfs helpers ─────────────────────────────────────────
 
-unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t, cpu: i32) -> i32 {
+pub(crate) unsafe fn perf_event_open(attr: &PerfEventAttr, pid: libc::pid_t, cpu: i32) -> i32 {
     // perf_event_open(attr, pid, cpu, group_fd=-1, flags=0)
     libc::syscall(
         libc::SYS_perf_event_open,
@@ -156,6 +168,40 @@ pub(crate) fn pmu_config_bit(pmu: &str, field: &str) -> Option<u32> {
             .ok()?;
     let bit = s.trim().strip_prefix("config:")?;
     bit.parse::<u32>().ok().filter(|b| *b < 64)
+}
+
+/// Parse a PMU format string like `"config:28"`, `"config2:0-31"`, or
+/// `"config1:16-23"` into `(config_index, lo_bit, hi_bit)` where
+/// `config_index` is 0 for `config`, 1 for `config1`, 2 for `config2`.
+pub(crate) fn parse_pmu_format(s: &str) -> Option<(u8, u32, u32)> {
+    let (reg, bits) = s.trim().split_once(':')?;
+    let idx = match reg {
+        "config" => 0,
+        "config1" => 1,
+        "config2" => 2,
+        "config3" => 3,
+        _ => return None,
+    };
+    let (lo, hi) = match bits.split_once('-') {
+        Some((a, b)) => (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?),
+        None => {
+            let b = bits.parse::<u32>().ok()?;
+            (b, b)
+        }
+    };
+    if lo > hi || hi >= 64 {
+        return None;
+    }
+    Some((idx, lo, hi))
+}
+
+/// Multi-bit or single-bit PMU format descriptor from
+/// `/sys/bus/event_source/devices/<pmu>/format/<field>`.
+pub(crate) fn pmu_config_range(pmu: &str, field: &str) -> Option<(u8, u32, u32)> {
+    let s =
+        std::fs::read_to_string(format!("/sys/bus/event_source/devices/{pmu}/format/{field}"))
+            .ok()?;
+    parse_pmu_format(&s)
 }
 
 /// Parse a sysfs CPU list ("0-3,5,7-8").
@@ -216,7 +262,7 @@ fn parse_leading_int(s: &str) -> Option<i32> {
 pub(crate) struct Ring {
     /// CPU the event is bound to; -1 for the single-task fallback.
     pub(crate) cpu: i32,
-    fd: i32,
+    pub(crate) fd: i32,
     pub(crate) base: *mut libc::c_void,
     pub(crate) size: usize,
     aux: *mut libc::c_void,
@@ -266,18 +312,36 @@ impl Ring {
     /// AUX tracer: control page + data page, then the AUX area. The AUX
     /// size halves down to `AUX_SIZE_MIN` on EPERM/ENOMEM (mlock budget).
     pub(crate) fn aux(fd: i32, cpu: i32, label: &str) -> Option<Ring> {
+        Self::aux_with_data_pages(fd, cpu, AUX_RING_DATA_PAGES, label)
+    }
+
+    /// AUX tracer with a configurable power-of-two number of data pages
+    /// (used by CoreSight, which reads `PERF_RECORD_AUX` chunk descriptors
+    /// from the data ring). Shrinks `data_pages` down to 1 on mlock pressure.
+    pub(crate) fn aux_with_data_pages(
+        fd: i32,
+        cpu: i32,
+        data_pages: usize,
+        label: &str,
+    ) -> Option<Ring> {
         let mut r = Ring::new(fd, cpu);
-        let size = (AUX_RING_DATA_PAGES + 1) * PAGE_SIZE;
-        match Self::mmap(fd, size, libc::PROT_READ | libc::PROT_WRITE, 0) {
-            Some(b) => {
+        let mut pages = data_pages.max(1);
+        loop {
+            let size = (pages + 1) * PAGE_SIZE;
+            if let Some(b) = Self::mmap(fd, size, libc::PROT_READ | libc::PROT_WRITE, 0) {
                 r.base = b;
                 r.size = size;
+                break;
             }
-            None => {
-                eprintln!("{label}: mmap ring (cpu {cpu}): {}", std::io::Error::last_os_error());
+            let err = std::io::Error::last_os_error();
+            let budget = matches!(err.raw_os_error(), Some(libc::EPERM) | Some(libc::ENOMEM));
+            if !budget || pages <= 1 {
+                eprintln!("{label}: mmap ring (cpu {cpu}): {err}");
                 return None;
             }
+            pages /= 2;
         }
+        let size = r.size;
         let mut aux_size = AUX_SIZE;
         loop {
             // Program the AUX area in the mmap header, then map it.
@@ -306,12 +370,21 @@ impl Ring {
         }
     }
 
+    /// Cumulative bytes committed to the AUX area (`aux_head`).
+    pub(crate) fn aux_head(&self) -> u64 {
+        if self.base == libc::MAP_FAILED {
+            0
+        } else {
+            unsafe { read_u64(self.base, OFF_AUX_HEAD) }
+        }
+    }
+
     /// Bytes of trace the kernel committed to the AUX area.
     pub(crate) fn aux_data(&self) -> &[u8] {
         if self.aux == libc::MAP_FAILED || self.base == libc::MAP_FAILED {
             return &[];
         }
-        let len = (unsafe { read_u64(self.base, OFF_AUX_HEAD) } as usize).min(self.aux_size);
+        let len = (self.aux_head() as usize).min(self.aux_size);
         unsafe { std::slice::from_raw_parts(self.aux as *const u8, len) }
     }
 
@@ -324,6 +397,28 @@ impl Ring {
     /// every child copy (perf_event_for_each_child).
     pub(crate) fn disable(&self) {
         unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_DISABLE, 0) };
+    }
+
+    /// PERF_EVENT_IOC_SET_FILTER: configure hardware IP address range comparators
+    /// (e.g. `filter 0x<start>/0x<size>` or `filter 0x<off>/0x<size>@<path>`).
+    /// On an inherited event the kernel applies the filter to all child copies too
+    /// (`perf_event_for_each_child(event, perf_event_addr_filters_apply)`).
+    pub(crate) fn set_filter(&self, filter: &str) -> Result<(), std::io::Error> {
+        let mut buf = Vec::with_capacity(filter.len() + 1);
+        buf.extend_from_slice(filter.as_bytes());
+        buf.push(0);
+        let rc = unsafe { libc::ioctl(self.fd, PERF_EVENT_IOC_SET_FILTER, buf.as_ptr()) };
+        if rc < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Underlying perf event file descriptor.
+    #[allow(dead_code)]
+    pub(crate) fn raw_fd(&self) -> i32 {
+        self.fd
     }
 }
 
@@ -425,5 +520,14 @@ mod tests {
     fn attr_matches_the_kernel_abi_size() {
         // PERF_ATTR_SIZE_VER8
         assert_eq!(std::mem::size_of::<PerfEventAttr>(), 136);
+    }
+
+    #[test]
+    fn pmu_format_ranges_parse_single_and_multi_bit() {
+        assert_eq!(parse_pmu_format("config:28\n"), Some((0, 28, 28)));
+        assert_eq!(parse_pmu_format("config2:0-31\n"), Some((2, 0, 31)));
+        assert_eq!(parse_pmu_format("config2:32-63"), Some((2, 32, 63)));
+        assert_eq!(parse_pmu_format("config:64"), None);
+        assert_eq!(parse_pmu_format("config2:31-0"), None);
     }
 }

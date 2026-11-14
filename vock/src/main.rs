@@ -68,7 +68,9 @@ options:
   --btf               resolve PCs via /proc/kallsyms (no vmlinux needed)
   --ordered           sequential output: kcov per-TID coverage-<TID>.html,
                       hw a single time-ordered coverage.html
-  --filter KW         filter coverage report to matching paths
+  --filter KW         filter coverage report to matching paths (or kernel symbols)
+  --sink SINK         CoreSight sink override (e.g. tmc_etr0, tmc_etf0; auto-probed by default)
+  --addr-filter SPEC  CoreSight ETMv4 IP range filter (symbol(s), 0x<addr>/0x<size>, or @<binary>)
   -d, --output-dir D  write all artifacts into D (created if missing)
   -A N, -B N, -C N    context lines in the processed coverage artifacts\n                      (kerncov.log, asmcov.log, coverage.html; default 3, patch-style)
 
@@ -201,6 +203,12 @@ fn real_main() -> i32 {
         } else if a == "--filter" && i + 1 < args.len() {
             i += 1;
             filter = Some(args[i].clone());
+        } else if (a == "--sink" || a == "--cs-sink") && i + 1 < args.len() {
+            i += 1;
+            std::env::set_var("VOCK_CS_SINK", &args[i]);
+        } else if (a == "--addr-filter" || a == "--cs-filter") && i + 1 < args.len() {
+            i += 1;
+            std::env::set_var("VOCK_CS_FILTER", &args[i]);
         } else if a == "-A" && i + 1 < args.len() {
             i += 1;
             ctx_after = args[i].parse().unwrap_or(0);

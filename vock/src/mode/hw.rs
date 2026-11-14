@@ -5,7 +5,7 @@
 //! The CPU-specific backends live in:
 //!   - streaming::intel  Intel PT (x86_64)
 //!   - sampling::amd     AMD LBR + IBS (x86_64)
-//!   - streaming::arm    Arm CoreSight ETM/ETE (aarch64), TODO
+//!   - streaming::arm    Arm CoreSight ETM/ETE (aarch64)
 //!
 //! all built on the shared per-CPU, child-following perf plumbing in
 //! mode::perf.
@@ -26,7 +26,12 @@ enum Backend {
 }
 
 impl Backend {
-    fn start(pid: libc::pid_t) -> Option<Backend> {
+    fn start(
+        pid: libc::pid_t,
+        vmlinux: Option<&str>,
+        filter: Option<&str>,
+        target_bin: Option<&str>,
+    ) -> Option<Backend> {
         if streaming::intel::available() {
             return IntelPt::start(pid).map(Backend::IntelPt);
         }
@@ -34,7 +39,7 @@ impl Backend {
             return Amd::start(pid).map(Backend::Amd);
         }
         if streaming::arm::available() {
-            return CoreSight::start(pid).map(Backend::CoreSight);
+            return CoreSight::start(pid, vmlinux, filter, target_bin).map(Backend::CoreSight);
         }
         eprintln!("hw_trace: no hardware trace PMU found");
         None
@@ -102,7 +107,7 @@ pub fn run(
     }
     unsafe { libc::close(pipefd[0]) };
 
-    let mut backend = match Backend::start(pid) {
+    let mut backend = match Backend::start(pid, vmlinux, filter, cmd.first().map(String::as_str)) {
         Some(b) => b,
         None => {
             eprintln!("hw_trace: start failed");

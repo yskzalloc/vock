@@ -10,7 +10,9 @@
 //! walks it. TSC packets cut each stream into timestamped pieces, merged
 //! across CPUs by streaming::merge_streams.
 
-use super::{clear_raw_traces, merge_streams, save_raw_trace, write_kerncov, Stream};
+use super::{
+    clear_raw_traces, load_vmlinux_text, merge_streams, save_raw_trace, write_kerncov, Stream,
+};
 use crate::mode::perf::{coverage_scope, open_rings, pmu_config_bit, pmu_exists, pmu_type};
 use crate::mode::perf::{PerfEventAttr, Ring};
 
@@ -888,81 +890,6 @@ impl<'a> PtDecoder<'a> {
         self.stats.report(&self.label);
         self.pc_count
     }
-}
-
-/// Port of load_vmlinux_text(): mmap the ELF and copy out the `.text` section.
-/// Returns (text bytes, sh_addr, sh_size).
-fn load_vmlinux_text(vmlinux: &str) -> Option<(Vec<u8>, u64, usize)> {
-    let map = match std::fs::read(vmlinux) {
-        Ok(m) => m,
-        Err(_) => return None,
-    };
-    // Minimal ELF64 parse.
-    if map.len() < 64 {
-        return None;
-    }
-    let rd_u16 = |o: usize| -> u16 { u16::from_le_bytes([map[o], map[o + 1]]) };
-    let rd_u32 =
-        |o: usize| -> u32 { u32::from_le_bytes([map[o], map[o + 1], map[o + 2], map[o + 3]]) };
-    let rd_u64 = |o: usize| -> u64 {
-        u64::from_le_bytes([
-            map[o],
-            map[o + 1],
-            map[o + 2],
-            map[o + 3],
-            map[o + 4],
-            map[o + 5],
-            map[o + 6],
-            map[o + 7],
-        ])
-    };
-
-    // Elf64_Ehdr: e_shoff @ 0x28, e_shentsize @ 0x3a, e_shnum @ 0x3c,
-    // e_shstrndx @ 0x3e.
-    let e_shoff = rd_u64(0x28) as usize;
-    let e_shentsize = rd_u16(0x3a) as usize;
-    let e_shnum = rd_u16(0x3c) as usize;
-    let e_shstrndx = rd_u16(0x3e) as usize;
-    if e_shentsize == 0 || e_shoff == 0 {
-        return None;
-    }
-
-    // Section header field offsets (Elf64_Shdr): sh_name @0, sh_addr @0x10,
-    // sh_offset @0x18, sh_size @0x20.
-    let shdr = |i: usize| -> usize { e_shoff + i * e_shentsize };
-    if e_shstrndx >= e_shnum {
-        return None;
-    }
-    let shstr_off = rd_u64(shdr(e_shstrndx) + 0x18) as usize;
-
-    for i in 0..e_shnum {
-        let base = shdr(i);
-        if base + 0x28 > map.len() {
-            break;
-        }
-        let sh_name = rd_u32(base) as usize;
-        // Compare the null-terminated name against ".text".
-        let name_pos = shstr_off + sh_name;
-        if section_name_is(&map, name_pos, b".text") {
-            let sh_addr = rd_u64(base + 0x10);
-            let sh_offset = rd_u64(base + 0x18) as usize;
-            let sh_size = rd_u64(base + 0x20) as usize;
-            if sh_offset + sh_size > map.len() {
-                return None;
-            }
-            let text = map[sh_offset..sh_offset + sh_size].to_vec();
-            return Some((text, sh_addr, sh_size));
-        }
-    }
-
-    None
-}
-
-fn section_name_is(map: &[u8], pos: usize, want: &[u8]) -> bool {
-    if pos + want.len() >= map.len() {
-        return false;
-    }
-    &map[pos..pos + want.len()] == want && map[pos + want.len()] == 0
 }
 
 // ─── Minimal x86-64 instruction decoder (port of decode_insn) ────────────────

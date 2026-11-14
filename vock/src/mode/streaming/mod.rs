@@ -3,7 +3,7 @@
 //! into kernel PCs after the run.
 //!
 //!   - `intel`: Intel PT (x86_64)
-//!   - `arm`:   Arm CoreSight ETM/ETE (aarch64), TODO
+//!   - `arm`:   Arm CoreSight ETM/ETE (aarch64)
 //!
 //! Shared here: raw-trace file handling and the timestamp merge of the
 //! per-CPU decoded streams into one chronological kerncov.log.
@@ -58,11 +58,79 @@ pub(crate) fn clear_raw_traces() {
         for e in rd.flatten() {
             let n = e.file_name();
             let n = n.to_string_lossy();
-            if n == "hw_trace.bin" || (n.starts_with("hw_trace.cpu") && n.ends_with(".bin")) {
+            if n == "hw_trace.bin"
+                || n == "hw_trace.meta"
+                || (n.starts_with("hw_trace.cpu") && n.ends_with(".bin"))
+            {
                 let _ = std::fs::remove_file(e.path());
             }
         }
     }
+}
+
+/// Read the `.text` section from an uncompressed ELF64 `vmlinux`.
+/// Returns `(text_bytes, sh_addr, sh_size)`.
+pub(crate) fn load_vmlinux_text(vmlinux: &str) -> Option<(Vec<u8>, u64, usize)> {
+    let map = std::fs::read(vmlinux).ok()?;
+    if map.len() < 64 {
+        return None;
+    }
+    let rd_u16 = |o: usize| -> u16 { u16::from_le_bytes([map[o], map[o + 1]]) };
+    let rd_u32 =
+        |o: usize| -> u32 { u32::from_le_bytes([map[o], map[o + 1], map[o + 2], map[o + 3]]) };
+    let rd_u64 = |o: usize| -> u64 {
+        u64::from_le_bytes([
+            map[o],
+            map[o + 1],
+            map[o + 2],
+            map[o + 3],
+            map[o + 4],
+            map[o + 5],
+            map[o + 6],
+            map[o + 7],
+        ])
+    };
+
+    let e_shoff = rd_u64(0x28) as usize;
+    let e_shentsize = rd_u16(0x3a) as usize;
+    let e_shnum = rd_u16(0x3c) as usize;
+    let e_shstrndx = rd_u16(0x3e) as usize;
+    if e_shentsize == 0 || e_shoff == 0 || e_shstrndx >= e_shnum {
+        return None;
+    }
+    let shdr = |i: usize| -> usize { e_shoff + i * e_shentsize };
+    let shstr_ec = shdr(e_shstrndx);
+    if shstr_ec + 0x20 > map.len() {
+        return None;
+    }
+    let shstr_off = rd_u64(shstr_ec + 0x18) as usize;
+
+    for i in 0..e_shnum {
+        let base = shdr(i);
+        if base + 0x28 > map.len() {
+            break;
+        }
+        let sh_name = rd_u32(base) as usize;
+        let name_pos = shstr_off + sh_name;
+        if section_name_is(&map, name_pos, b".text") {
+            let sh_addr = rd_u64(base + 0x10);
+            let sh_offset = rd_u64(base + 0x18) as usize;
+            let sh_size = rd_u64(base + 0x20) as usize;
+            if sh_offset + sh_size > map.len() {
+                return None;
+            }
+            let text = map[sh_offset..sh_offset + sh_size].to_vec();
+            return Some((text, sh_addr, sh_size));
+        }
+    }
+    None
+}
+
+fn section_name_is(map: &[u8], pos: usize, want: &[u8]) -> bool {
+    if pos + want.len() >= map.len() {
+        return false;
+    }
+    &map[pos..pos + want.len()] == want && map[pos + want.len()] == 0
 }
 
 /// Save one CPU's raw AUX stream (streams cannot be concatenated, so one
