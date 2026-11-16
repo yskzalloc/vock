@@ -123,6 +123,7 @@ heuristic is reserved for foreign x86 logs.
 
 ```
 --mode kcov --ordered --vmlinux  vock selftest target vfs-fork  → coverage-<TID>.html per task
+--mode kcov --ordered --btf      vock selftest target vfs-fork  → same, resolved via /proc/kallsyms
 --mode kcov --filter fs --vmlinux                     → coverage.html narrowed to fs/ paths
 ```
 
@@ -144,6 +145,12 @@ that say nothing about sequence semantics. The skip is by emulation, not by
 architecture: a bare-metal arm64 machine with KVM still runs it, and so does
 `--on host`. Capping the report did not help, the symbolization is the cost,
 not the rendering.
+
+The `--ordered --btf` run passes no `--vmlinux` or `--kernel-src` and
+asserts that the per-TID reports exist and that most PCs in the largest
+`srccov-local-<TID>.log` resolve to a kallsyms function, not `??`. It fails
+if the report fell back to a default vmlinux. kallsyms lookup is cheap, so
+this one also runs under TCG.
 
 Verifies: strace format (`') = '`), trace.syz output, coverage PCs > 0, HTML
 report, per-TID ordered report, and keyword filtering. `sud` traces up to the

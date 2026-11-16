@@ -639,6 +639,45 @@ impl Harness {
             self.sample_largest("srccov-local-", ".log", 3);
         } // end of the non-emulated branch
 
+        // --ordered --btf: the sequence resolved via /proc/kallsyms, no
+        // vmlinux. It used to go through the vmlinux-only sequence path and
+        // render every PC as `??` when no vmlinux was at hand. kallsyms is a
+        // table lookup, not DWARF, so this runs under TCG as well. No
+        // --vmlinux/--kernel-src on purpose; a "falling back" line means the
+        // kallsyms path resolved nothing and a default vmlinux hid it.
+        println!("\n[Test: --mode kcov --ordered --btf (kallsyms, no vmlinux)]");
+        let script = format!(
+            "rm -f kerncov.log coverage-*.html local-*.log remote-*.log srccov-local-*.log && {vb} --mode kcov --ordered --btf {fork_tgt} >/dev/null 2>vock-ordered-btf.err; ls coverage-*.html >/dev/null 2>&1 && echo ORDERED_BTF_OK=$(ls coverage-*.html | wc -l); grep -q 'falling back to symbolization' vock-ordered-btf.err && echo ORDERED_BTF_FALLBACK; L=$(ls -S srccov-local-*.log 2>/dev/null | head -1); if [ -n \"$L\" ]; then echo ORDERED_BTF_TOTAL=$(wc -l < $L); echo ORDERED_BTF_RESOLVED=$(awk '$2 != \"??\"' $L | wc -l); fi; rm -f vock-ordered-btf.err"
+        );
+        let r = self.vng_run(&sv(&["bash", "-c", &script]));
+        self.vlog(&r, false);
+        let out = r.stdout_str();
+        match field(&out, "ORDERED_BTF_OK=").and_then(|v| v.parse::<usize>().ok()) {
+            Some(n) if n >= want_tids => self.log(
+                "PASS",
+                &format!("--ordered --btf: {n} per-TID coverage-<TID>.html (vfs-fork: {want_tids} tasks)"),
+            ),
+            Some(n) => {
+                self.log("FAIL", &format!("--ordered --btf: {n} per-TID reports, vfs-fork makes {want_tids} tasks"));
+                self.vlog(&r, true);
+            }
+            None => {
+                self.log("FAIL", "--ordered --btf: no per-TID report generated");
+                self.vlog(&r, true);
+            }
+        }
+        let total = field(&out, "ORDERED_BTF_TOTAL=").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        let resolved = field(&out, "ORDERED_BTF_RESOLVED=").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        if out.contains("ORDERED_BTF_FALLBACK") {
+            self.log("FAIL", "--ordered --btf: kallsyms resolved nothing, report fell back to a vmlinux");
+        } else if total > 0 && resolved * 2 >= total {
+            self.log("PASS", &format!("--ordered --btf: {resolved}/{total} PCs resolved via kallsyms"));
+        } else {
+            self.log("FAIL", &format!("--ordered --btf: {resolved}/{total} PCs resolved via kallsyms (rows are ??)"));
+            self.vlog(&r, true);
+        }
+        self.sample_largest("srccov-local-", ".log", 3);
+
         println!("\n[Test: --mode kcov --filter fs --vmlinux]");
         let script = format!(
             "rm -f kerncov.log coverage.html && {vb} --mode kcov --filter fs --vmlinux {vmlinux} --kernel-src {ks} {tgt} 2>&1 >/dev/null; [ -f coverage.html ] && echo HTML_OK && grep -qE 'fs/' coverage.html && echo FILTER_OK"

@@ -620,6 +620,14 @@ fn run_ordered(opts: &Options, parts: &[PathBuf], kernel_src: &str, vmlinux: &st
             uniq.len()
         );
     }
+    // --btf picks the resolver for the sequence too: without this branch
+    // `--ordered --btf` went through the vmlinux pipeline only, and with no
+    // vmlinux at hand (the usual reason for --btf) every row came out `??`.
+    if opts.btf {
+        if let Some(rc) = run_ordered_btf(opts, &seq, &uniq, vmlinux) {
+            return rc;
+        }
+    }
     let mut p = Progress::new(opts.quiet);
     let offset = kaslr::detect_offset(vmlinux, &seq[..seq.len().min(100)]);
     timing::mark("report: kaslr");
@@ -660,6 +668,59 @@ fn run_ordered(opts: &Options, parts: &[PathBuf], kernel_src: &str, vmlinux: &st
         );
     }
     0
+}
+
+/// `--ordered --btf`: the execution sequence resolved via /proc/kallsyms,
+/// function granularity (no file:line without a vmlinux). Like `run_btf`,
+/// returns `None` when kallsyms resolved nothing and a vmlinux is at hand,
+/// so the caller falls back to the DWARF sequence report.
+fn run_ordered_btf(opts: &Options, seq: &[u64], uniq: &[u64], vmlinux: &str) -> Option<i32> {
+    let log = Path::new(&opts.log);
+    let mut p = Progress::new(opts.quiet);
+    let resolved = btf::resolve_pcs(&hex_strings(uniq), "/proc/kallsyms");
+    // One lookup per unique PC; the sequence keeps every duplicate.
+    let name_of: HashMap<u64, String> = uniq
+        .iter()
+        .zip(resolved)
+        .filter_map(|(&pc, (_, name))| name.map(|n| (pc, n)))
+        .collect();
+    timing::mark("report: btf resolved");
+    if name_of.is_empty() && Path::new(vmlinux).is_file() {
+        eprintln!(
+            "btf: kallsyms resolved 0 of {} PCs; falling back to \
+             symbolization against {vmlinux}",
+            uniq.len()
+        );
+        return None;
+    }
+    p.done(&format!(
+        "{} of {} unique PCs resolved, kallsyms",
+        name_of.len(),
+        uniq.len()
+    ));
+    // srccov twin: `0x<pc> <function>`, same shape as non-ordered --btf.
+    symbolize::write_srccov(log, seq, &name_of);
+    timing::mark("report: srccov written");
+    p.done(&format!(
+        "source-line log \u{2192} {}",
+        symbolize::srccov_path(log).display()
+    ));
+    // No source column: kallsyms has no file:line. The address column is
+    // the raw PC, the value the function was resolved from.
+    let lines: Vec<String> = seq
+        .iter()
+        .map(|a| name_of.get(a).cloned().unwrap_or_else(|| String::from("??")))
+        .collect();
+    html::generate_ordered(&hex_strings(seq), &lines, &opts.output);
+    timing::mark("report: ordered html written");
+    if !opts.quiet {
+        println!(
+            "\x1b[92m✓ Written: {} (ordered, {} entries, kallsyms)\x1b[0m",
+            opts.output,
+            seq.len()
+        );
+    }
+    Some(0)
 }
 
 /// `--btf`: resolve via /proc/kallsyms. Returns `None` when kallsyms
