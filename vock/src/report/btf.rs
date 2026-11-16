@@ -46,17 +46,95 @@ fn parse_pc(pc: &str) -> Option<u64> {
 /// about -128 TiB and resolved 0 functions; on x86 the same poison happened
 /// to compute the correct slide, which is why only arm64 CI caught it.
 ///
+/// KCOV is the exception: with CONFIG_RANDOMIZE_BASE it reports *unslid*
+/// PCs (`canonicalize_ip()` subtracts `kaslr_offset()`), i.e. link-time
+/// addresses relative to the arch's link base, while /proc/kallsyms is
+/// slid. The slide is then the kallsyms text anchor minus the link base;
+/// see [`link_bases`] and [`slide_from`].
+///
 /// A foreign log (PCs from another boot of the kernel) keeps the legacy
 /// heuristic, on x86_64 only, where its text-base constant is meaningful.
 fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
+    kaslr_offset_for(HOST_ARCH, int_pcs, syms)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Arch {
+    X86_64,
+    Aarch64,
+    Other,
+}
+
+const HOST_ARCH: Arch = if cfg!(target_arch = "x86_64") {
+    Arch::X86_64
+} else if cfg!(target_arch = "aarch64") {
+    Arch::Aarch64
+} else {
+    Arch::Other
+};
+
+/// Link-time (unslid) `_text` addresses the kernel can have on `arch`.
+///
+/// - x86_64: `__START_KERNEL` = `__START_KERNEL_map` + the default
+///   `CONFIG_PHYSICAL_START` (16 MiB).
+/// - arm64: `KIMAGE_VADDR` = `MODULES_END` = `_PAGE_END(VA_BITS_MIN)` +
+///   `MODULES_VSIZE` (`arch/arm64/include/asm/memory.h`), where
+///   `_PAGE_END(va)` = `-(1 << (va - 1))` and `VA_BITS_MIN` is `VA_BITS`
+///   capped at 48 (52-bit configs use 48). `MODULES_VSIZE` is 2 GiB on
+///   current kernels and was 128 MiB before v6.2.
+///
+/// The candidates sit hundreds of MiB to TiBs apart while kernel text is
+/// tens of MiB, so at most one of them can put the majority of a log's PCs
+/// inside the kallsyms text range: the choice is checked, not guessed.
+fn link_bases(arch: Arch) -> Vec<u64> {
+    match arch {
+        Arch::X86_64 => vec![0xffff_ffff_8100_0000],
+        Arch::Aarch64 => {
+            let mut v = Vec::new();
+            for va in [48u32, 47, 42, 39, 36] {
+                let page_end = (1u64 << (va - 1)).wrapping_neg();
+                for modules_vsize in [2u64 << 30, 128 << 20] {
+                    v.push(page_end.wrapping_add(modules_vsize));
+                }
+            }
+            v
+        }
+        Arch::Other => Vec::new(),
+    }
+}
+
+/// KASLR slide granularity: `MIN_KIMG_ALIGN` on arm64, the default
+/// `CONFIG_PHYSICAL_ALIGN` on x86_64. Both 2 MiB.
+const KASLR_ALIGN: u64 = 2 << 20;
+
+/// Slide for a kernel linked at `base`, from the slid kallsyms anchor.
+///
+/// `base` is the link address of `_text`. x86 lists `_text` in kallsyms, so
+/// the difference is exact. arm64 does not: the only anchor is `_stext`,
+/// which sits after `.head.text` (64 KiB on current kernels, not a fixed
+/// constant), so `_stext - base` overshoots by that much. The slide itself
+/// is `KASLR_ALIGN`-aligned and `.head.text` is far smaller, so rounding
+/// down recovers it.
+fn slide_from(anchor: u64, anchor_is_text: bool, base: u64) -> i64 {
+    let d = anchor.wrapping_sub(base);
+    (if anchor_is_text {
+        d
+    } else {
+        d & !(KASLR_ALIGN - 1)
+    }) as i64
+}
+
+fn kaslr_offset_for(arch: Arch, int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
     let Some(min_pc) = int_pcs.iter().copied().min() else {
         return 0;
     };
     let last = syms.last().unwrap().0;
     let mut text_addr: Option<u64> = None;
+    let mut anchor_is_text = false;
     for (addr, name) in syms {
         if name == "_text" || name == "_stext" {
             text_addr = Some(*addr);
+            anchor_is_text = name == "_text";
             break;
         }
     }
@@ -72,38 +150,32 @@ fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
         .iter()
         .filter(|&&pc| pc >= text_addr && pc <= last)
         .count();
+    let max_pc = int_pcs.iter().copied().max().unwrap_or(0);
+    let pct = |n: usize| {
+        if int_pcs.is_empty() {
+            0
+        } else {
+            n * 100 / int_pcs.len()
+        }
+    };
 
     // The decision made here cannot be validated after the fact: a wrong
     // offset still lands inside the symbol table and resolves to
     // plausible-looking but unrelated functions. So state the inputs and the
     // choice, always. Without this line a misattributed report is
     // indistinguishable from a report of genuinely odd coverage.
-    let pct = if int_pcs.is_empty() {
-        0
-    } else {
-        in_text * 100 / int_pcs.len()
+    let say = |decision: &str, n: usize| {
+        eprintln!(
+            "btf: kallsyms text {text_addr:#x}..{last:#x} ({} syms), PCs \
+             {min_pc:#x}..{max_pc:#x}, {n}/{} in text ({}%) → {decision}",
+            syms.len(),
+            int_pcs.len(),
+            pct(n),
+        );
     };
-    let decision = if in_text * 2 >= int_pcs.len() {
-        "same-kernel, offset 0"
-    } else if min_pc < text_addr {
-        if cfg!(target_arch = "x86_64") {
-            "foreign log, legacy x86 slide"
-        } else {
-            "foreign log, no slide on this arch"
-        }
-    } else if min_pc > last {
-        "foreign log, negative slide"
-    } else {
-        "offset 0"
-    };
-    eprintln!(
-        "btf: kallsyms text {text_addr:#x}..{last:#x} ({} syms), PCs \
-         {min_pc:#x}..{:#x}, {in_text}/{} in text ({pct}%) → {decision}",
-        syms.len(),
-        int_pcs.iter().copied().max().unwrap_or(0),
-        int_pcs.len(),
-    );
+
     if in_text * 2 >= int_pcs.len() {
+        say("same-kernel, offset 0", in_text);
         if in_text < int_pcs.len() {
             eprintln!(
                 "btf: {} PC(s) fall outside the kallsyms text range and \
@@ -113,15 +185,56 @@ fn kaslr_offset(int_pcs: &[u64], syms: &[(u64, String)]) -> i64 {
         }
         return 0; // same-kernel log
     }
+
+    // Unslid log (KCOV under KASLR): slide = kallsyms _text - link base.
+    // Take the one link base that puts the majority of PCs in the kernel
+    // image text. Bounded by _etext, not the last kallsyms entry: module
+    // symbols can sit far above the image and would widen the window enough
+    // for a wrong candidate to pass too. Ties keep the earlier (current
+    // layout) candidate.
+    let text_end = syms
+        .iter()
+        .find(|(_, n)| n == "_etext")
+        .or_else(|| syms.iter().find(|(_, n)| n == "_end"))
+        .map(|s| s.0)
+        .unwrap_or(last);
+    let mut best: Option<(u64, i64, usize)> = None;
+    for base in link_bases(arch) {
+        let off = slide_from(text_addr, anchor_is_text, base);
+        let n = int_pcs
+            .iter()
+            .filter(|&&pc| {
+                let adj = (pc as i64).wrapping_add(off) as u64;
+                adj >= text_addr && adj <= text_end
+            })
+            .count();
+        if best.is_none_or(|(_, _, b)| n > b) {
+            best = Some((base, off, n));
+        }
+    }
+    if let Some((base, off, n)) = best {
+        if n * 2 >= int_pcs.len() {
+            say(
+                &format!("unslid log, link base {base:#x}, slide {:#x}", off as u64),
+                n,
+            );
+            return off;
+        }
+    }
+
     if min_pc < text_addr {
-        if cfg!(target_arch = "x86_64") {
+        if arch == Arch::X86_64 {
+            say("foreign log, legacy x86 slide", in_text);
             text_addr as i64 - 0xffff_ffff_8100_0000u64 as i64
         } else {
+            say("foreign log, no slide on this arch", in_text);
             0
         }
     } else if min_pc > last {
+        say("foreign log, negative slide", in_text);
         -((min_pc - text_addr) as i64)
     } else {
+        say("offset 0", in_text);
         0
     }
 }
@@ -462,5 +575,85 @@ mod tests {
         let resolved = resolve_pcs(&pcs, &ks);
         std::fs::remove_file(&ks).unwrap();
         assert_eq!(resolved[0].1.as_deref(), Some("alpha"));
+    }
+
+    /// kallsyms of a KASLR-slid kernel whose image links at `base`: the
+    /// text anchor, two functions, `_etext`, plus a module symbol far above
+    /// the image (arm64 places modules within 2 GiB of the kernel). x86
+    /// lists `_text`; arm64 lists only `_stext`, after the 64 KiB
+    /// `.head.text`, as the real qemuarm64 kallsyms does.
+    fn slid_syms(arch: Arch, base: u64, slide: u64) -> Vec<(u64, String)> {
+        let s = |off: u64, n: &str| (base + slide + off, n.to_string());
+        let anchor = if arch == Arch::X86_64 {
+            s(0, "_text")
+        } else {
+            s(0x10000, "_stext")
+        };
+        vec![
+            anchor,
+            s(0x10000, "alpha"),
+            s(0x20000, "beta"),
+            s(0x0200_0000, "_etext"),
+            s(0x0300_0000, "_end"),
+            s(0xf000_0000, "mod_func"),
+        ]
+    }
+
+    /// arm64 CI regression: KCOV reports unslid PCs (canonicalize_ip()
+    /// subtracts kaslr_offset()), so a `--mode kcov --btf` log on a KASLR
+    /// arm64 kernel sat entirely below kallsyms _text and every PC resolved
+    /// to ??. The slide is the kallsyms anchor minus KIMAGE_VADDR, rounded
+    /// to 2 MiB because arm64 kallsyms has only `_stext` (64 KiB in): an
+    /// unrounded slide resolved every PC to a function 64 KiB away.
+    #[test]
+    fn unslid_arm64_kcov_log_va48() {
+        let base = 0xffff_8000_8000_0000; // KIMAGE_VADDR, VA_BITS_MIN=48
+        let slide = 0x3e_7a20_0000;
+        let syms = slid_syms(Arch::Aarch64, base, slide);
+        let pcs = [
+            base + 0x10004,
+            base + 0x10008,
+            base + 0x20010,
+            base + 0x59148,
+        ];
+        assert_eq!(kaslr_offset_for(Arch::Aarch64, &pcs, &syms), slide as i64);
+    }
+
+    #[test]
+    fn unslid_arm64_kcov_log_va39() {
+        let base = 0xffff_ffc0_8000_0000; // KIMAGE_VADDR, VA_BITS=39
+        let slide = 0x1_2340_0000;
+        let syms = slid_syms(Arch::Aarch64, base, slide);
+        let pcs = [base + 0x10004, base + 0x20010];
+        assert_eq!(kaslr_offset_for(Arch::Aarch64, &pcs, &syms), slide as i64);
+    }
+
+    /// Pre-v6.2 layout, MODULES_VSIZE = 128 MiB.
+    #[test]
+    fn unslid_arm64_kcov_log_old_modules_vsize() {
+        let base = 0xffff_8000_0800_0000;
+        let slide = 0x2_0000_0000;
+        let syms = slid_syms(Arch::Aarch64, base, slide);
+        let pcs = [base + 0x10004, base + 0x20010];
+        assert_eq!(kaslr_offset_for(Arch::Aarch64, &pcs, &syms), slide as i64);
+    }
+
+    /// nokaslr arm64 kernel: the log is already in kallsyms space.
+    #[test]
+    fn arm64_kcov_log_without_kaslr_needs_no_slide() {
+        let base = 0xffff_8000_8000_0000;
+        let syms = slid_syms(Arch::Aarch64, base, 0);
+        let pcs = [base + 0x10004, base + 0x20010];
+        assert_eq!(kaslr_offset_for(Arch::Aarch64, &pcs, &syms), 0);
+    }
+
+    /// x86 KCOV under KASLR goes through the same link-base path.
+    #[test]
+    fn unslid_x86_kcov_log() {
+        let base = 0xffff_ffff_8100_0000;
+        let slide = 0xb20_0000;
+        let syms = slid_syms(Arch::X86_64, base, slide);
+        let pcs = [base + 0x10004, base + 0x20010];
+        assert_eq!(kaslr_offset_for(Arch::X86_64, &pcs, &syms), slide as i64);
     }
 }
