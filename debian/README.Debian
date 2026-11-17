@@ -13,9 +13,9 @@ The coverage shim
 -----------------
 
 vock loads /usr/lib/vock/kcov.so into the traced process with LD_PRELOAD. It
-is a private helper, not a public library: it has no SONAME and no stable ABI,
-so it is not in the linker search path. Override its location with
-VOCK_KCOV_SO if you need to.
+is a private helper, not a public library: it has no stable ABI and nothing
+links against it, so it is not in the linker search path. Override its
+location with VOCK_KCOV_SO if you need to.
 
 selftest
 --------

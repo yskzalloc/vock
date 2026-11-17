@@ -3,8 +3,14 @@ name: vock CI
 on:
   push:
     branches: [main]
+    # A v* tag runs the same selftests and package builds, then publishes a
+    # GitHub release from them (job `release` at the end).
+    tags: ['v*']
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   selftest:
@@ -301,6 +307,187 @@ jobs:
       if: always()
       run: |
         sudo dmesg
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Debian package, built only after the selftests passed on both arches.
+  #
+  # The build follows debian/rules as a buildd would: dependencies vendored
+  # into debian/vendor first (the only networked step), then an offline
+  # `dpkg-buildpackage -b` with the distribution's own cargo/rustc, which runs
+  # `cargo test` too. lintian then checks the result, and the installed
+  # package must pass the autopkgtest in debian/tests/smoke.
+  #
+  # Versions: a v* tag builds the version in debian/changelog as is and checks
+  # it against the tag and Cargo.toml. Any other push gets a snapshot version,
+  # <changelog version>+git<date>.<sha>, so artifacts from main are never
+  # mistaken for the release.
+  # ───────────────────────────────────────────────────────────────────────────
+  deb:
+    name: deb (${{ matrix.arch }})
+    needs: selftest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    env:
+      # Hosted runners ship rustup in ~/.cargo/bin, ahead of /usr/bin on PATH.
+      # The package must build with the distribution toolchain that
+      # Build-Depends names, so every step below uses this PATH instead.
+      DEB_PATH: /usr/sbin:/usr/bin:/sbin:/bin
+      DEBEMAIL: noreply@github.com
+      DEBFULLNAME: vock CI
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install packaging tools
+      run: |
+        sudo apt-get update
+        # dpkg-checkbuilddeps below enforces debian/control's Build-Depends
+        # (rustc >= 1.82 included); the rest are lintian, dch and what
+        # debian/tests/control asks for.
+        sudo apt-get install -y --no-install-recommends \
+            build-essential debhelper dpkg-dev cargo rustc libstd-rust-dev \
+            devscripts lintian man-db binutils gcc libc6-dev
+        PATH=$DEB_PATH rustc --version
+        PATH=$DEB_PATH cargo --version
+        PATH=$DEB_PATH dpkg-checkbuilddeps
+
+    - name: Set the package version
+      id: version
+      run: |
+        set -euo pipefail
+        export PATH=$DEB_PATH
+        CHLOG=$(dpkg-parsechangelog -S Version)
+        UPSTREAM=${CHLOG%-*}
+        CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+        if [ "$UPSTREAM" != "$CARGO" ]; then
+            echo "::error::debian/changelog upstream version $UPSTREAM != Cargo.toml $CARGO"
+            exit 1
+        fi
+        if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            if [ "${GITHUB_REF_NAME}" != "v$CARGO" ]; then
+                echo "::error::tag ${GITHUB_REF_NAME} does not match version v$CARGO"
+                exit 1
+            fi
+            VERSION=$CHLOG
+        else
+            # Rewrites the top (UNRELEASED) entry in the runner's checkout
+            # only; nothing is committed.
+            VERSION="$CHLOG+git$(date -u +%Y%m%d).${GITHUB_SHA::7}"
+            dch --no-auto-nmu -v "$VERSION" -D UNRELEASED \
+                "CI snapshot of ${GITHUB_SHA}."
+        fi
+        echo "Building vock $VERSION"
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+    - name: Vendor crates
+      run: PATH=$DEB_PATH ./debian/get-vendor.sh
+
+    - name: Build the package
+      run: |
+        set -euo pipefail
+        export PATH=$DEB_PATH
+        dpkg-buildpackage -b -us -uc 2>&1 | tee dpkg-buildpackage.log
+        mkdir -p deb-out
+        # Ubuntu's debhelper names the debug package .ddeb, Debian's .deb.
+        mv ../vock_*.deb ../vock-dbgsym_* ../vock_*.buildinfo ../vock_*.changes \
+           dpkg-buildpackage.log deb-out/
+        ls -l deb-out
+
+    - name: lintian
+      run: |
+        # Errors fail the job. Warnings are expected while debian/changelog
+        # still carries the ITP placeholder (Closes: #NNNNNN).
+        PATH=$DEB_PATH lintian --fail-on error --info deb-out/vock_*.changes
+
+    - name: Install and run the autopkgtest
+      run: |
+        sudo apt-get install -y ./deb-out/vock_*_${{ matrix.arch }}.deb
+        dpkg -L vock
+        # debian/tests/smoke as the unprivileged runner user, so the root
+        # gate checks run too.
+        AUTOPKGTEST_TMP=$(mktemp -d) sh debian/tests/smoke
+
+    - name: Upload packages
+      uses: actions/upload-artifact@v4
+      with:
+        name: deb-${{ matrix.arch }}
+        path: deb-out/
+        if-no-files-found: error
+
+    - name: Job summary
+      if: always()
+      run: |
+        {
+          echo "# vock Debian package (${{ matrix.arch }})"
+          echo
+          echo "Version \`${{ steps.version.outputs.version }}\`, built on $(. /etc/os-release && echo "$PRETTY_NAME")"
+          echo "with $(PATH=$DEB_PATH rustc --version)."
+          echo
+          echo '```'
+          ls -l deb-out 2>/dev/null || echo "no packages built"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GitHub release, for v* tags only, once every selftest and both package
+  # builds have passed. The release notes are github-release.md at the tagged
+  # commit; update it before tagging. Re-running the job on an existing
+  # release replaces the assets and keeps the notes.
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [selftest, deb]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Collect packages
+      uses: actions/download-artifact@v4
+      with:
+        pattern: deb-*
+        path: dist
+        merge-multiple: true
+
+    - name: Assemble release assets
+      run: |
+        set -euo pipefail
+        TAG=${GITHUB_REF_NAME}
+        VER=${TAG#v}
+        # The source tarball the Debian watch file and the Yocto recipe
+        # describe, with its checksum next to the packages'.
+        git archive --format=tar.gz --prefix="vock-$VER/" \
+            -o "dist/vock-$VER.tar.gz" "$TAG"
+        rm -f dist/dpkg-buildpackage.log
+        (cd dist && sha256sum -- * > SHA256SUMS)
+        ls -l dist
+        cat dist/SHA256SUMS
+        test -s github-release.md || { echo "::error::github-release.md is empty"; exit 1; }
+
+    - name: Publish
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        TAG=${GITHUB_REF_NAME}
+        if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+        else
+            gh release create "$TAG" dist/* --verify-tag \
+                --title "vock ${TAG}" --notes-file github-release.md
+        fi
 
 
   # ───────────────────────────────────────────────────────────────────────────

@@ -34,17 +34,24 @@ for sub in execprog prog2c selftest; do
 done
 pass "execprog/prog2c/selftest --help all work"
 
-# ── the coverage shim: private helper, no SONAME (per README.Debian) ────────
+# ── the coverage shim: private helper, off the linker path (README.Debian) ──
 SHIM=/usr/lib/vock/kcov.so
 test -f "$SHIM" || fail "$SHIM is missing"
 # Accept either wording: binutils prints "Shared object file" for a plain
 # .so and "Position-Independent Executable file" for a PIE, both ET_DYN.
 readelf -hW "$SHIM" | grep -qE 'Type:.*DYN' \
     || fail "$SHIM is not ET_DYN"
-if readelf -dW "$SHIM" | grep -q SONAME; then
-    fail "$SHIM has a SONAME; it is documented as a private helper"
+# Private means "not on the linker path", not "no SONAME": newer rustc gives
+# every cdylib a SONAME (libkcov_preload.so) by default, which is harmless
+# here because nothing links against it and no file by that name is shipped.
+case "$(dirname "$(readlink -f "$SHIM")")" in
+    /lib|/usr/lib|/lib/*-linux-gnu|/usr/lib/*-linux-gnu)
+        fail "$SHIM is on the default linker path" ;;
+esac
+if ldconfig -p 2>/dev/null | grep -qE 'kcov(_preload)?\.so'; then
+    fail "$SHIM is registered in the ld.so cache"
 fi
-pass "coverage shim is a SONAME-less private shared object"
+pass "coverage shim is a private shared object, off the linker path"
 
 # ── hardening, which debian/rules forwards into RUSTFLAGS ───────────────────
 for f in /usr/bin/vock "$SHIM"; do
