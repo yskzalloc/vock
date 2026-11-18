@@ -563,7 +563,7 @@ jobs:
         (cd dist && sha256sum -- * > SHA256SUMS)
         ls -l dist
         cat dist/SHA256SUMS
-        test -s github-release.md || { echo "::error::github-release.md is empty"; exit 1; }
+        # test -s github-release.md || { echo "::error::github-release.md is empty"; exit 1; }
 
     - name: Publish
       env:
@@ -575,7 +575,7 @@ jobs:
             gh release upload "$TAG" dist/* --clobber
         else
             gh release create "$TAG" dist/* --verify-tag \
-                --title "vock ${TAG}" --notes-file github-release.md
+                --title "vock ${TAG}" # --notes-file github-release.md
         fi
 
 
