@@ -38,11 +38,11 @@ const IOC_NONE: u32 = 0;
 const IOC_WRITE: u32 = 1;
 const IOC_READ: u32 = 2;
 
-const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
+const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::Ioctl {
     (((dir << IOC_DIRSHIFT)
         | (ty << IOC_TYPESHIFT)
         | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)) as u32) as libc::c_ulong
+        | (size << IOC_SIZESHIFT)) as u32) as libc::Ioctl
 }
 
 const U: u32 = b'U' as u32;
@@ -53,16 +53,16 @@ const SZ_EP_IO: u32 = 8; // usb_raw_ep_io: ep+flags+length (+ flex data[])
 const SZ_EP_DESC: u32 = 9; // usb_endpoint_descriptor (packed, audio-extended)
 const SZ_U32: u32 = 4;
 
-const USB_RAW_IOCTL_INIT: libc::c_ulong = ioc(IOC_WRITE, U, 0, SZ_INIT);
-const USB_RAW_IOCTL_RUN: libc::c_ulong = ioc(IOC_NONE, U, 1, 0);
-const USB_RAW_IOCTL_EVENT_FETCH: libc::c_ulong = ioc(IOC_READ, U, 2, SZ_EVENT);
-const USB_RAW_IOCTL_EP0_WRITE: libc::c_ulong = ioc(IOC_WRITE, U, 3, SZ_EP_IO);
-const USB_RAW_IOCTL_EP0_READ: libc::c_ulong = ioc(IOC_READ | IOC_WRITE, U, 4, SZ_EP_IO);
-const USB_RAW_IOCTL_EP_ENABLE: libc::c_ulong = ioc(IOC_WRITE, U, 5, SZ_EP_DESC);
-const USB_RAW_IOCTL_EP_DISABLE: libc::c_ulong = ioc(IOC_WRITE, U, 6, SZ_U32);
-const USB_RAW_IOCTL_CONFIGURE: libc::c_ulong = ioc(IOC_NONE, U, 9, 0);
-const USB_RAW_IOCTL_VBUS_DRAW: libc::c_ulong = ioc(IOC_WRITE, U, 10, SZ_U32);
-const USB_RAW_IOCTL_EP0_STALL: libc::c_ulong = ioc(IOC_NONE, U, 12, 0);
+const USB_RAW_IOCTL_INIT: libc::Ioctl = ioc(IOC_WRITE, U, 0, SZ_INIT);
+const USB_RAW_IOCTL_RUN: libc::Ioctl = ioc(IOC_NONE, U, 1, 0);
+const USB_RAW_IOCTL_EVENT_FETCH: libc::Ioctl = ioc(IOC_READ, U, 2, SZ_EVENT);
+const USB_RAW_IOCTL_EP0_WRITE: libc::Ioctl = ioc(IOC_WRITE, U, 3, SZ_EP_IO);
+const USB_RAW_IOCTL_EP0_READ: libc::Ioctl = ioc(IOC_READ | IOC_WRITE, U, 4, SZ_EP_IO);
+const USB_RAW_IOCTL_EP_ENABLE: libc::Ioctl = ioc(IOC_WRITE, U, 5, SZ_EP_DESC);
+const USB_RAW_IOCTL_EP_DISABLE: libc::Ioctl = ioc(IOC_WRITE, U, 6, SZ_U32);
+const USB_RAW_IOCTL_CONFIGURE: libc::Ioctl = ioc(IOC_NONE, U, 9, 0);
+const USB_RAW_IOCTL_VBUS_DRAW: libc::Ioctl = ioc(IOC_WRITE, U, 10, SZ_U32);
+const USB_RAW_IOCTL_EP0_STALL: libc::Ioctl = ioc(IOC_NONE, U, 12, 0);
 
 const USB_RAW_EVENT_CONNECT: u32 = 1;
 const USB_RAW_EVENT_CONTROL: u32 = 2;
@@ -179,7 +179,7 @@ fn parse_usb_descriptor(buf: &[u8]) -> Option<DeviceIndex> {
 }
 
 // ─── raw-gadget ioctl wrappers ───────────────────────────────────────────────
-unsafe fn ioctl_ptr(fd: i32, req: libc::c_ulong, arg: *mut libc::c_void) -> i32 {
+unsafe fn ioctl_ptr(fd: i32, req: libc::Ioctl, arg: *mut libc::c_void) -> i32 {
     libc::ioctl(fd, req, arg) as i32
 }
 
@@ -530,7 +530,7 @@ pub fn syz_open_dev(path: &str, id: u64, id2: u64) -> i32 {
 
 fn sleep_ms(ms: u64) {
     let ts = libc::timespec {
-        tv_sec: (ms / 1000) as libc::time_t,
+        tv_sec: (ms / 1000) as _,
         tv_nsec: ((ms % 1000) * 1_000_000) as libc::c_long,
     };
     unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };

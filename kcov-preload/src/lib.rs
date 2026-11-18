@@ -22,10 +22,10 @@ use std::io::Write;
 const COVER_SZ: usize = 2 << 20;
 
 // KCOV ioctl encodings (asm-generic).
-const KCOV_INIT_TRACE: libc::c_ulong = 0x8008_6301; // _IOR('c', 1, unsigned long)
-const KCOV_ENABLE: libc::c_ulong = 0x6364; // _IO('c', 100)
-const KCOV_DISABLE: libc::c_ulong = 0x6365; // _IO('c', 101)
-const KCOV_REMOTE_ENABLE: libc::c_ulong = 0x4018_6366; // _IOW('c', 102, kcov_remote_arg)
+const KCOV_INIT_TRACE: libc::Ioctl = 0x8008_6301u32 as libc::Ioctl; // _IOR('c', 1, unsigned long)
+const KCOV_ENABLE: libc::Ioctl = 0x6364u32 as libc::Ioctl; // _IO('c', 100)
+const KCOV_DISABLE: libc::Ioctl = 0x6365u32 as libc::Ioctl; // _IO('c', 101)
+const KCOV_REMOTE_ENABLE: libc::Ioctl = 0x4018_6366u32 as libc::Ioctl; // _IOW('c', 102, kcov_remote_arg)
 const KCOV_TRACE_PC: libc::c_ulong = 0;
 
 const KCOV_SUBSYSTEM_COMMON: u64 = 0x00 << 56;
@@ -834,7 +834,8 @@ mod tests {
         KEY.store(key as usize, Ordering::SeqCst);
 
         let spawn = |f: extern "C-unwind" fn(*mut c_void) -> *mut c_void| unsafe {
-            let mut h: libc::pthread_t = 0;
+            // pthread_t is an integer on glibc and a pointer on musl.
+            let mut h: libc::pthread_t = std::mem::zeroed();
             assert_eq!(
                 libc::pthread_create(
                     &mut h,

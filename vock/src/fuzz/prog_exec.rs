@@ -56,9 +56,9 @@ fn disarm() {
 
 // ─── KCOV ───────────────────────────────────────────────────────────────────
 
-const KCOV_INIT_TRACE: libc::c_ulong = 0x8008_6301;
-const KCOV_ENABLE: libc::c_ulong = 0x6364;
-const KCOV_DISABLE: libc::c_ulong = 0x6365;
+const KCOV_INIT_TRACE: libc::Ioctl = 0x8008_6301u32 as libc::Ioctl;
+const KCOV_ENABLE: libc::Ioctl = 0x6364u32 as libc::Ioctl;
+const KCOV_DISABLE: libc::Ioctl = 0x6365u32 as libc::Ioctl;
 const KCOV_TRACE_PC: libc::c_ulong = 0;
 const COVER_SIZE: usize = 2 << 20; // 16 MiB map; Rust kernels emit dense coverage
 
@@ -161,7 +161,7 @@ impl Drop for Kcov {
     }
 }
 
-const KCOV_REMOTE_ENABLE: libc::c_ulong = 0x4018_6366;
+const KCOV_REMOTE_ENABLE: libc::Ioctl = 0x4018_6366u32 as libc::Ioctl;
 
 #[repr(C)]
 struct KcovRemoteArg {

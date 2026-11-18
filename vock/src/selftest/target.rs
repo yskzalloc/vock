@@ -83,9 +83,9 @@ pub const RUST_TARGET_ARGS: &[&str] = &["selftest", "target", "rust-touch"];
 pub const RUST_MISC_DEV: &str = "/dev/rust-misc-device";
 
 // ioctls from the sample's doc block: _IO/_IOR/_IOW('|', ...).
-const RUST_MISC_DEV_HELLO: libc::c_ulong = 0x7c80;
-const RUST_MISC_DEV_GET_VALUE: libc::c_ulong = 0x8004_7c81;
-const RUST_MISC_DEV_SET_VALUE: libc::c_ulong = 0x4004_7c82;
+const RUST_MISC_DEV_HELLO: libc::Ioctl = 0x7c80u32 as libc::Ioctl;
+const RUST_MISC_DEV_GET_VALUE: libc::Ioctl = 0x8004_7c81u32 as libc::Ioctl;
+const RUST_MISC_DEV_SET_VALUE: libc::Ioctl = 0x4004_7c82u32 as libc::Ioctl;
 
 /// Exercise the Rust misc device end to end, write path first: write()
 /// lands in the sample's write_iter, read() in read_iter, and the three
@@ -482,19 +482,19 @@ fn afalg_xts(encrypt: bool, key: &[u8], iv: &[u8; 16], input: &[u8]) -> Result<V
         msg.msg_iov = &mut iovec;
         msg.msg_iovlen = 1;
         msg.msg_control = cbuf.as_mut_ptr() as *mut libc::c_void;
-        msg.msg_controllen = cbuf.len();
+        msg.msg_controllen = cbuf.len() as _;
 
         let c1 = libc::CMSG_FIRSTHDR(&msg);
         (*c1).cmsg_level = libc::SOL_ALG;
         (*c1).cmsg_type = libc::ALG_SET_OP;
-        (*c1).cmsg_len = libc::CMSG_LEN(4) as usize;
+        (*c1).cmsg_len = libc::CMSG_LEN(4) as _;
         let opval: u32 = if encrypt { libc::ALG_OP_ENCRYPT as u32 } else { libc::ALG_OP_DECRYPT as u32 };
         std::ptr::copy_nonoverlapping(&opval as *const u32 as *const u8, libc::CMSG_DATA(c1), 4);
 
         let c2 = libc::CMSG_NXTHDR(&msg, c1);
         (*c2).cmsg_level = libc::SOL_ALG;
         (*c2).cmsg_type = libc::ALG_SET_IV;
-        (*c2).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<AfAlgIv>() as u32) as usize;
+        (*c2).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<AfAlgIv>() as u32) as _;
         let ivmsg = AfAlgIv { ivlen: 16, iv: *iv };
         std::ptr::copy_nonoverlapping(
             &ivmsg as *const AfAlgIv as *const u8,

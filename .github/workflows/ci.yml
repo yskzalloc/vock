@@ -438,15 +438,104 @@ jobs:
 
 
   # ───────────────────────────────────────────────────────────────────────────
-  # GitHub release, for v* tags only, once every selftest and both package
-  # builds have passed. The release notes are github-release.md at the tagged
+  # musl libc build, on Alpine with Alpine's own Rust toolchain.
+  #
+  # Embedded distributions build vock against musl (OpenEmbedded with
+  # TCLIBC = "musl", Alpine, ...). The libc crate types several things
+  # differently there: the ioctl request is c_int instead of c_ulong
+  # (libc::Ioctl), pthread_t is a pointer, and msghdr/cmsghdr lengths are
+  # socklen_t. None of that shows up in a glibc build, so this job compiles
+  # and tests the whole workspace natively on musl and smoke-tests the result.
+  # Coverage itself is not exercised here: the selftests above cover the
+  # engines, and the container has no KCOV or trace PMU.
+  #
+  # Alpine's rustc targets x86_64-alpine-linux-musl with dynamic linking, so
+  # the kcov.so cdylib builds as it does on glibc. (rustup's
+  # x86_64-unknown-linux-musl defaults to crt-static, which cannot produce a
+  # cdylib at all.)
+  # ───────────────────────────────────────────────────────────────────────────
+  musl:
+    name: musl (Alpine 3.24.4, x86_64)
+    runs-on: ubuntu-26.04
+    container:
+      image: alpine:3.24.4
+
+    steps:
+    # git before checkout, so actions/checkout makes a real clone instead of
+    # falling back to the REST API tarball.
+    - name: Install dependencies
+      run: |
+        # build-base: gcc + musl-dev, the linker rustc drives, and the C
+        #             compiler the prog2c check below uses.
+        # linux-headers: the <linux/*.h> that prog2c output includes.
+        # binutils: readelf/nm for the ELF checks.
+        apk add --no-cache build-base cargo rust make binutils git linux-headers
+
+    - uses: actions/checkout@v4
+
+    - name: Toolchain info
+      run: |
+        cat /etc/alpine-release
+        rustc -vV
+        cargo --version
+        ldd --version 2>&1 | head -1 || true
+
+    - name: Build
+      run: |
+        cargo build --release --locked
+        make
+
+    - name: Unit tests
+      run: cargo test --release --locked
+
+    - name: Smoke test the musl binaries
+      run: |
+        set -eu
+        # Linked against musl, not something glibc that happened to be around.
+        readelf -lW vock.bin | grep -q 'ld-musl-' \
+            || { echo "::error::vock.bin is not using the musl loader"; exit 1; }
+        readelf -dW mode/kcov.so | grep NEEDED
+        readelf -dW mode/kcov.so | grep -q 'libc.musl-' \
+            || { echo "::error::kcov.so does not link musl libc"; exit 1; }
+
+        # The shim must interpose the same entry points as on glibc, or fork
+        # and thread following silently stops working.
+        for s in fork vfork pthread_create execve _exit; do
+            nm -D --defined-only mode/kcov.so | grep -qE " T $s\$" \
+                || { echo "::error::kcov.so does not export $s"; exit 1; }
+        done
+
+        ./vock.bin --help >/dev/null
+        for sub in execprog prog2c selftest; do
+            ./vock.bin "$sub" --help >/dev/null
+        done
+
+        # Loading the shim into a forking shell must not crash it, with or
+        # without a KCOV device behind it.
+        LD_PRELOAD="$PWD/mode/kcov.so" sh -c '/bin/true & wait'
+
+        T=$(mktemp -d)
+        printf '0xffffffff81001000\n0xffffffff81001234\n' > "$T/kerncov.log"
+        ./vock.bin report --log "$T/kerncov.log" -d "$T/out" >/dev/null
+
+        printf '%s\n' 'openat(0xffffffffffffff9c, 0x20000000, 0x2, 0x0) = 3' \
+                      'close(0x3) = 0' > "$T/t.syz"
+        ./vock.bin prog2c "$T/t.syz" -o "$T/repro.c" >/dev/null
+        gcc -Wall -o "$T/repro" "$T/repro.c"
+        echo "musl smoke test passed"
+
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # GitHub release, for v* tags only, once every selftest, both package
+  # builds and the musl build have passed. The release notes are
+  # github-release.md at the tagged
   # commit; update it before tagging. Re-running the job on an existing
   # release replaces the assets and keeps the notes.
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [selftest, deb]
+    needs: [selftest, deb, musl]
     runs-on: ubuntu-26.04
     permissions:
       contents: write

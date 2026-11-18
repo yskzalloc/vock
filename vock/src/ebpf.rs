@@ -274,9 +274,9 @@ fn bpf_prog_load(prog_type: u32, insns: &[u64]) -> i32 {
 const PERF_TYPE_TRACEPOINT: u32 = 2;
 const PERF_SAMPLE_RAW: u64 = 1 << 10;
 // _IO('$', 0)
-const PERF_EVENT_IOC_ENABLE: libc::c_ulong = 0x2400;
+const PERF_EVENT_IOC_ENABLE: libc::Ioctl = 0x2400u32 as libc::Ioctl;
 // _IOW('$', 8, __u32)
-const PERF_EVENT_IOC_SET_BPF: libc::c_ulong = 0x4004_2408;
+const PERF_EVENT_IOC_SET_BPF: libc::Ioctl = 0x4004_2408u32 as libc::Ioctl;
 
 #[repr(C)]
 struct PerfEventAttr {

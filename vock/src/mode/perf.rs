@@ -24,9 +24,9 @@ use std::ptr;
 // SET_FILTER = _IOW('$', 6, char *).
 // _IO(type,nr) with dir=NONE(0), size=0 → (type << 8) | nr, '$' == 0x24.
 // _IOW('$', 6, char *) on 64-bit → (1 << 30) | (8 << 16) | (0x24 << 8) | 6 = 0x40082406.
-const PERF_EVENT_IOC_ENABLE: libc::c_ulong = 0x2400;
-const PERF_EVENT_IOC_DISABLE: libc::c_ulong = 0x2401;
-pub(crate) const PERF_EVENT_IOC_SET_FILTER: libc::c_ulong = 0x4008_2406;
+const PERF_EVENT_IOC_ENABLE: libc::Ioctl = 0x2400u32 as libc::Ioctl;
+const PERF_EVENT_IOC_DISABLE: libc::Ioctl = 0x2401u32 as libc::Ioctl;
+pub(crate) const PERF_EVENT_IOC_SET_FILTER: libc::Ioctl = 0x4008_2406u32 as libc::Ioctl;
 
 pub(crate) const PERF_TYPE_HARDWARE: u32 = 0;
 pub(crate) const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;

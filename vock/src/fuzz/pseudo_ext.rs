@@ -116,8 +116,7 @@ fn syz_open_procfs(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
 fn syz_open_pts(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
     let master = args[0] as libc::c_int;
     let mut idx: libc::c_int = 0;
-    // TIOCGPTN
-    if unsafe { libc::ioctl(master, 0x8004_5430, &mut idx) } < 0 {
+    if unsafe { libc::ioctl(master, libc::TIOCGPTN, &mut idx) } < 0 {
         return (-1, unsafe { *libc::__errno_location() });
     }
     open_path(&format!("/dev/pts/{idx}"), args[1] as libc::c_int)
@@ -307,8 +306,8 @@ fn arena_slice(addr: i64, len: usize) -> Option<&'static [u8]> {
 /// Write an image to a temporary file and attach it to a free loop device.
 /// Returns the device path and its open fd; the caller closes the fd.
 fn attach_loop(img: &[u8]) -> Option<(String, libc::c_int)> {
-    const LOOP_CTL_GET_FREE: libc::c_ulong = 0x4C82;
-    const LOOP_SET_FD: libc::c_ulong = 0x4C00;
+    const LOOP_CTL_GET_FREE: libc::Ioctl = 0x4C82u32 as libc::Ioctl;
+    const LOOP_SET_FD: libc::Ioctl = 0x4C00u32 as libc::Ioctl;
 
     let path = format!("/tmp/vock-img-{}", unsafe { libc::getpid() });
     std::fs::write(&path, img).ok()?;
@@ -347,7 +346,7 @@ fn attach_loop(img: &[u8]) -> Option<(String, libc::c_int)> {
 /// Detach a loop device (`reset_loop_device`, common_linux.h:3443). Without
 /// this a --repeat run burns one /dev/loopN per iteration until none are left.
 fn detach_loop(lfd: libc::c_int) {
-    const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
+    const LOOP_CLR_FD: libc::Ioctl = 0x4C01u32 as libc::Ioctl;
     unsafe {
         libc::ioctl(lfd, LOOP_CLR_FD);
         libc::close(lfd);
@@ -410,7 +409,7 @@ fn syz_mount_image(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
 /// `syz_read_part_table(size, img)`, force a partition-table re-scan of an
 /// image attached to a loop device (common_linux.h).
 fn syz_read_part_table(args: &[i64; crate::prog_decode::MAX_ARGS]) -> (i64, i32) {
-    const BLKRRPART: libc::c_ulong = 0x125F;
+    const BLKRRPART: libc::Ioctl = 0x125Fu32 as libc::Ioctl;
     let size = args[0].max(0) as usize;
     let Some(img) = arena_slice(args[1], size.min(crate::prog_decode::MAX_IMAGE)) else {
         return (-1, libc::EINVAL);
